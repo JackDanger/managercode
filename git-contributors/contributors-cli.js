@@ -42,6 +42,22 @@ function emailPairNormalized(email1, email2) {
   }
 }
 
+emailDomains = []
+function groupFromEmailDomain(email) {
+  // Given an email address, return an integer to use as a clustering group
+  // decided by retrieving the index of the domain in the list of all domains
+  // that have yet been calculated by this function
+  var parts = email.split('@')
+  if (parts.length < 2) {
+    return 1  // incalculable case
+  }
+  var domain = parts[1]
+  if (emailDomains.indexOf(domain) < 0) {
+    emailDomains.push(domain)
+  }
+  return emailDomains.indexOf(domain) + 2 // always greater than the incalculable case
+}
+
 function weightedGraph() {
   // Calculate the connections between committers into the same repositories.
   // Does not record any repository data, only the number of times two people
@@ -83,7 +99,7 @@ function weightedGraph() {
   for (var email in allCommits) {
     var node = {
       id: email,
-      group: 1,
+      group: groupFromEmailDomain(email),
       commits: allCommits[email],
     }
     graph.nodes.push(node)
@@ -116,7 +132,7 @@ glob(repo_list + "/*/.git", function(err, files) {
       }
     }
   }
-  fs.writeFile("./graphData.json", JSON.stringify(weightedGraph()), function(err) {
+  fs.writeFile("./graphData.json", JSON.stringify(weightedGraph(), null, 2), function(err) {
     if(err) {
         return console.log(err);
     }
