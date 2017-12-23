@@ -138,4 +138,6 @@ glob(repo_list + "/*/.git", function(err, files) {
     }
   }); 
   console.log("The contribution graph has been regenerated into ./graphData.js")
+  console.log("Run a web server and open the html page to view results")
+  console.log("python -m SimpleHTTPServer & (sleep 5 && open http://localhost:8000/git-contributors/contributors.html) && fg")
 })

@@ -7,7 +7,7 @@ clone_org() {
   # updates them if they are already cloned
   local organization=$1
   local checkout_location=$2
-  curl -s "https://api.github.com/orgs/${organization}/repos?per_page=1000" |
+  curl -s "https://api.github.com/orgs/${organization}/repos?per_page=1000&type=sources" |
     jq '.[] | .full_name' |
     sed 's/"//g' |
     while read repo; do
