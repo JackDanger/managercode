@@ -12,6 +12,10 @@
   stroke-width: 1.5px;
 }
 
+.dragging {
+  cursor: link;
+}
+
 </style>
 <body></body>
 <!-- <script src="https://d3js.org/d3.v4.min.js"></script> -->
@@ -32,29 +36,50 @@ var zoom = d3.zoom()
     .translateExtent([[-100, -100], [width + 90, height + 100]])
     .on("zoom", zoomed);
 
-force_graph
-    .call(zoom)
-    .on("wheel", function() { d3.event.preventDefault(); })
-    .on("zoom", zoomed);
+var drag = d3.drag()
+    .on("start", dragstarted)
+    .on("drag", dragged)
+    .on("end", dragended);
 
 function zoomed() {
   force_graph.attr("transform", d3.event.transform);
 }
+function dragstarted(d) {
+  d3.event.sourceEvent.stopPropagation();
+  d3.select(this).classed("dragging", true);
+}
+function dragged(d) {
+  d3.select(this).attr("cx", d.x = d3.event.x).attr("cy", d.y = d3.event.y);
+}
+function dragended(d) {
+  d3.select(this).classed("dragging", false);
+}
+
+force_graph
+    .call(zoom)
+    .call(drag)
+    .on("wheel", function() { d3.event.preventDefault(); })
+    .on("zoom", zoomed);
+
 drawForceGraph(force_graph)
 
 function drawForceGraph(svg) {
-  var svg = d3.select("svg"),
-      width = +svg.attr("width"),
-      height = +svg.attr("height");
-
   var color = d3.scaleOrdinal(d3.schemeCategory20);
 
+  var force = d3.forceManyBody()
+  // Increase the force when near center of screen, lower at edges
+  var forceAtCenter = -200
+  force.strength(updateStrength)
+  function updateStrength(d) {
+    var offset = (Math.abs(d.x) / width) + (Math.abs(d.y) / height)
+    return forceAtCenter * (1 - offset)
+  }
   var simulation = d3.forceSimulation()
       .force("link", d3.forceLink().id(function(d) { return d.id; }))
-      .force("charge", d3.forceManyBody())
-      .force("center", d3.forceCenter(width / 2, height / 2));
+      .force("charge", force)
+      .force("center", d3.forceCenter(width / 3, height / 3));
 
-  d3.json("/graphData.json", function(error, graph) {
+  d3.json("graphData.json", function(error, graph) {
     if (error) throw error;
 
     var link = svg.append("g")
@@ -62,7 +87,7 @@ function drawForceGraph(svg) {
       .selectAll("line")
       .data(graph.links)
       .enter().append("line")
-        .attr("stroke-width", function(d) { return Math.log10(Math.log10(d.value)); });
+        .attr("stroke-width", function(d) { return Math.log10(d.value); });
 
     var node = svg.append("g")
       .attr("class", "node")
@@ -106,6 +131,7 @@ function drawForceGraph(svg) {
         .distance(300)
 
     function ticked() {
+      force.strength(updateStrength)
       link
           .attr("x1", function(d) { return d.source.x; })
           .attr("y1", function(d) { return d.source.y; })

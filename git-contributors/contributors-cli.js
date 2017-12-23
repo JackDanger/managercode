@@ -46,23 +46,23 @@ function weightedGraph() {
   // Calculate the connections between committers into the same repositories.
   // Does not record any repository data, only the number of times two people
   // overlapped within any repository
-  var allEmails = {}
+  var allCommits = {}
   var connectionCounts = {}
 
   for (var project in contributors) {
-    var emailSet = {}
+    var commitsForProject = {}
     for (var email in contributors[project]) {
-      allEmails[email] = true
-
-      if (!emailSet[email]) {
-        emailSet[email] = 0
+      if (!commitsForProject[email]) {
+        commitsForProject[email] = 0
+        allCommits[email] = 0
       }
-      emailSet[email] += contributors[project][email]
+      allCommits[email] += contributors[project][email]
+      commitsForProject[email] += contributors[project][email]
     }
     // Do a quadratic calculation to find the matrix overlap of all
     // contributors to this project
-    for (var email1 in emailSet) {
-      for (var email2 in emailSet) {
+    for (var email1 in commitsForProject) {
+      for (var email2 in commitsForProject) {
         if (email1 != email2) {
           var key = emailPairNormalized(email1, email2)
           if (!connectionCounts[key]) {
@@ -71,7 +71,7 @@ function weightedGraph() {
           // The connection between two people is the minimum of their
           // contributions to a single project, calculated for each project and
           // summed
-          connectionCounts[key] += Math.abs(emailSet[email1] - emailSet[email2])
+          connectionCounts[key] += Math.abs(commitsForProject[email1] - commitsForProject[email2])
         }
       }
     }
@@ -80,8 +80,12 @@ function weightedGraph() {
     nodes: [],
     links: []
   }
-  for (var email in allEmails) {
-    var node = {id: email, group: 1}
+  for (var email in allCommits) {
+    var node = {
+      id: email,
+      group: 1,
+      commits: allCommits[email],
+    }
     graph.nodes.push(node)
   }
   for (var emailPairKey in connectionCounts) {

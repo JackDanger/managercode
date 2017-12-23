@@ -1,7 +1,7 @@
 {
   "name": "@JackDanger/managercode",
-  "description": "The team codes the product, the manager codes the team.",
-  "version": "1.0",
+  "description": "The team knows the product, the manager knows the team.",
+  "version": "1.0.0",
   "url": "http://github.com/JackDanger/managercode",
   "author": "Jack Danger (https://jackdanger.com)",
   "license": "MIT",
