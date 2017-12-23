@@ -45,12 +45,15 @@ case $1 in
   "clone_org")
     [[ -z "$3" ]] && usage
     clone_org $2 $3
+    exit 0
     ;;
   "recent_work")
     [[ -z "$2" ]] && usage
     recent_work $2
+    exit 0
     ;;
   "")
     usage
     ;;
   esac
+usage
