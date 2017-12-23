@@ -6,10 +6,12 @@
   "author": "Jack Danger (https://jackdanger.com)",
   "license": "MIT",
   "dependencies": {
-    "glob": "^7.x.x"
+    "glob": "^7.x.x",
+    "@slack/client": "^3.x.x"
   },
   "bin": {
-    "contributors": "contributors.js"
+    "git": "git-contributions/contributions-cli.js",
+    "slack": "slack-activity/conversations-cli.js"
   },
   "repository": {
     "type": "git",
