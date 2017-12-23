@@ -4,7 +4,7 @@
  *   Run this file on the command line with a target directory which contains
  *   any number of git repositories. This script will calculate author
  *   contributions and output them as two lists of edges and vertices weighted
- *   by the log of connections between committers
+ *   by the square root of connections between committers
  */
 const { execSync } = require('child_process'); var glob = require('glob');
 var fs = require('fs');
@@ -71,7 +71,7 @@ function weightedGraph() {
           // The connection between two people is the minimum of their
           // contributions to a single project, calculated for each project and
           // summed
-          connectionCounts[key] += emailSet[email1] + emailSet[email2]
+          connectionCounts[key] += Math.abs(emailSet[email1] - emailSet[email2])
         }
       }
     }
@@ -112,7 +112,7 @@ glob(repo_list + "/*/.git", function(err, files) {
       }
     }
   }
-  fs.writeFile("./graphData.js", JSON.stringify(weightedGraph()), function(err) {
+  fs.writeFile("./graphData.json", JSON.stringify(weightedGraph()), function(err) {
     if(err) {
         return console.log(err);
     }
