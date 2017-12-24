@@ -7,10 +7,7 @@ var	adjacency_svg = d3.select("body")
 
 d3.json('graphData.json', function(data) {
   data.nodes.sort(function(a, b) { return d3.descending(a.count, b.count) } )
-  console.log("data", data.nodes)
   const adjacencyMatrix = d3AdjacencyMatrixLayout();
-  console.log('adjacencyMatrix', adjacencyMatrix);
-  console.log('d3', d3);
 
   adjacencyMatrix
     .size([870,870])
@@ -40,7 +37,7 @@ d3.json('graphData.json', function(data) {
         .style('stroke-width', '1px')
         .style('stroke-opacity', .1)
         .style('fill', d => someColors(d.source.group))
-        .style('fill-opacity', d => 1 - (1 / Math.log(d.source.count + d.target.count)));
+        .style('fill-opacity', d => 1 - (1 / d.weight));
 
   d3.select('#adjacencyG')
     .call(adjacencyMatrix.xAxis);
@@ -81,7 +78,7 @@ function d3AdjacencyMatrixLayout () {
       var constructedEdge = {
         source: edge.source,
         target: edge.target,
-        weight: edgeWeight(edge)
+        weight: edge.value
       };
       if (typeof edge.source === 'number') {
         constructedEdge.source = nodes[edge.source];
@@ -89,56 +86,29 @@ function d3AdjacencyMatrixLayout () {
       if (typeof edge.target === 'number') {
         constructedEdge.target = nodes[edge.target];
       }
-      var id = nodeID(constructedEdge.source) + '-' + nodeID(constructedEdge.target);
 
-      if (directed === false && constructedEdge.source.sortedIndex < constructedEdge.target.sortedIndex) {
-        id = nodeID(constructedEdge.target) + '-' + nodeID(constructedEdge.source);
-      }
-      if (!edgeHash[id]) {
-        edgeHash[id] = constructedEdge;
-      } else {
-        edgeHash[id].weight = edgeHash[id].weight + constructedEdge.weight;
-      }
+      var id = keyPair(nodeID(constructedEdge.source), nodeID(constructedEdge.target));
+      constructedEdge.id = id
+
+      edgeHash[id] = constructedEdge;
     });
 
     nodes.forEach(function (sourceNode, a) {
       nodes.forEach(function (targetNode, b) {
         var grid = {
-          id: nodeID(sourceNode) + '-' + nodeID(targetNode),
+          id: keyPair(nodeID(sourceNode), nodeID(targetNode)),
           source: sourceNode,
           target: targetNode,
           x: xScale(b),
           y: yScale(a),
-          weight: 0,
           height: nodeHeight,
           width: nodeWidth
         };
-        var edgeWeight = 0;
         if (edgeHash[grid.id]) {
-          edgeWeight = edgeHash[grid.id].weight;
-          grid.weight = edgeWeight;
-        }
-        if (directed === true || b < a) {
-          matrix.push(grid);
-          if (directed === false) {
-            var mirrorGrid = {
-              id: nodeID(sourceNode) + '-' + nodeID(targetNode),
-              source: sourceNode,
-              target: targetNode,
-              x: xScale(a),
-              y: yScale(b),
-              weight: 0,
-              height: nodeHeight,
-              width: nodeWidth
-            };
-            mirrorGrid.weight = edgeWeight;
-            matrix.push(mirrorGrid);
-          }
+          grid.weight = edgeHash[grid.id].weight;
         }
       });
     });
-
-    console.log('matrix', matrix, matrix.length);
 
     return matrix;
   }
@@ -205,5 +175,14 @@ function d3AdjacencyMatrixLayout () {
 
   return matrix;
 } 
+
+function keyPair(str1, str2) {
+  // Use a consistent key for referencing pairs of strings
+  if (str1 < str2) {
+    return str1 + '-' + str2
+  } else {
+    return str2 + '-' + str1
+  }
+}
 
 })()

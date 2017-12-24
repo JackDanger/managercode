@@ -66,12 +66,12 @@ function addMessage(channel, username) {
   }
 }
 
-function usernamePairNormalized(username1, username2) {
-  // Use a consistent key for referencing pairs of users
-  if (username1 < username2) {
-    return [username1, username2]
+function stringPairNormalized(str1, str2) {
+  // Use a consistent key for referencing pairs of strings
+  if (str1 < str2) {
+    return [str1, str2]
   } else {
-    return [username2, username1]
+    return [str2, str1]
   }
 }
 
@@ -96,7 +96,7 @@ function weightedGraph() {
     for (var username1 in messagesInChannel) {
       for (var username2 in messagesInChannel) {
         if (username1 != username2) {
-          var key = usernamePairNormalized(username1, username2)
+          var key = stringPairNormalized(username1, username2)
           if (!connectionCounts[key]) {
             connectionCounts[key] = 0
           }
