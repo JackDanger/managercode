@@ -7,7 +7,8 @@
   "license": "MIT",
   "dependencies": {
     "glob": "^7.x.x",
-    "@slack/client": "^3.x.x"
+    "@slack/client": "^3.x.x",
+    "bluebird": "^3.x.x"
   },
   "bin": {
     "git": "git-contributions/contributions-cli.js",

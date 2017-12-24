@@ -7,54 +7,71 @@
  * *avoiding env vars and command line arguments for security
  */
 var fs = require('fs');
+var Promise = require('bluebird');
 const { WebClient } = require('@slack/client');
- 
+
 if (process.argv.length <= 2) {
     console.log("Usage: " + __filename + " path/to/file/containing/slack/apitoken");
     process.exit(1);
 }
 var secretfile = process.argv[2]
-var slackToken = fs.readFileSync(secretfile)
+const slackToken = fs.readFileSync("./slack.token")
+const client = new WebClient(slackToken, { retryConfig: { maxRequestConcurrency: 10 }})
 
-var users = {}
-function addConversation(channel, user) {
+const nintyDaysAgo = new Date() - 3600*24*90
+
+const usernameMap = {}
+
+
+client.users.list()
+  .then(function(res) {
+    res.members.forEach((user) => {
+      if (!user.is_bot && user.name != 'slackbot') {
+        usernameMap[user.id] = user.name
+      }
+    })
+  })
+  .then(function() {
+    client.channels.list()
+      .then(function(res) {
+          return Promise.map(res.channels, function(channel) {
+              return client.channels.history(channel.id)
+                .then(function(r) {
+                  r.messages.forEach(function(message) {
+                    addMessage(channel.id, message.user)
+                  })
+                })
+          })
+      })
+      .then(function() {
+        fs.writeFile(__dirname + "/graphData.json", JSON.stringify(weightedGraph(), null, 2), function(err) {
+          if(err) { return console.log(err) }
+        }); 
+        console.log("The contribution graph has been regenerated into ./slack-activity/graphData.js")
+        console.log("Run a web server and open the html page to view results")
+        console.log("python -m SimpleHTTPServer & (sleep 5 && open http://localhost:8000/git-contributors/contributors.html) && fg")
+      })
+    })
+const users = {}
+function addMessage(channel, username) {
   // Record a person contributing a commit to a repo
   if (!users[channel]) {
     users[channel] = {}
   }
-  if (!users[channel][user]) {
-    users[channel][user] = 1
+  if (!users[channel][username]) {
+    users[channel][username] = 1
   } else {
-    users[channel][user]++
+    users[channel][username]++
   }
 }
 
 function usernamePairNormalized(username1, username2) {
-  // Use a consistent key for referencing pairs of emails
-  if (username1 == "" || username2 == "") {
-    console.log(username1, username2)
-  }
+  // Use a consistent key for referencing pairs of users
   if (username1 < username2) {
     return [username1, username2]
   } else {
     return [username2, username1]
   }
-}
-
-emailDomains = []
-function groupFromEmailDomain(email) {
-  // Given an email address, return an integer to use as a clustering group
-  // decided by retrieving the index of the domain in the list of all domains
-  // that have yet been calculated by this function
-  var parts = email.split('@')
-  if (parts.length < 2) {
-    return 1  // incalculable case
-  }
-  var domain = parts[1]
-  if (emailDomains.indexOf(domain) < 0) {
-    emailDomains.push(domain)
-  }
-  return emailDomains.indexOf(domain) + 2 // always greater than the incalculable case
 }
 
 function weightedGraph() {
@@ -63,15 +80,15 @@ function weightedGraph() {
   var messageCount = {}
   var connectionCounts = {}
 
-  for (var project in contributors) {
+  for (var channel in users) {
     var messagesInChannel = {}
-    for (var email in contributors[project]) {
-      if (!messagesInChannel[email]) {
-        messagesInChannel[email] = 0
-        messageCount[email] = 0
+    for (var username in users[channel]) {
+      if (!messagesInChannel[username]) {
+        messagesInChannel[username] = 0
+        messageCount[username] = 0
       }
-      messageCount[email] += contributors[project][email]
-      messagesInChannel[email] += contributors[project][email]
+      messageCount[username] += users[channel][username]
+      messagesInChannel[username] += users[channel][username]
     }
     // Do a quadratic calculation to find the matrix overlap of all
     // contributors to this project
@@ -94,48 +111,22 @@ function weightedGraph() {
     nodes: [],
     links: []
   }
-  for (var email in messageCount) {
+  for (var username in messageCount) {
     var node = {
-      id: email,
-      group: groupFromEmailDomain(email),
-      commits: messageCount[email],
+      id: usernameMap[username],
+      group: 1,
+      messages: messageCount[username],
     }
     graph.nodes.push(node)
   }
-  for (var emailPairKey in connectionCounts) {
-    var emailPair = emailPairKey.split(',')
+  for (var key in connectionCounts) {
+    var userIdPair = key.split(',')
     var link = {
-      source: emailPair[0],
-      target: emailPair[1],
-      value: connectionCounts[emailPair]
+      source: usernameMap[userIdPair[0]],
+      target: usernameMap[userIdPair[1]],
+      value: connectionCounts[key]
     }
     graph.links.push(link)
   }
   return graph
 }
-
-glob(repo_list + "/*/.git", function(err, files) {
-  for (var idx in files) {
-    var basedir = files[idx].replace('/.git', '')
-    console.log("repo: " + basedir)
-    var buff = execSync("git log --format='%ae' --since='3 months ago'", {cwd: basedir})
-    stdout = buff.toString('utf-8')
-    if (stdout.length) {
-      var lines = stdout.split('\n')
-      for (var idx in lines) {
-        if (lines[idx].length > 2) {
-          // record that a non-blank email has made a git commit
-          addContribution(basedir, lines[idx])
-        }
-      }
-    }
-  }
-  fs.writeFile("./graphData.json", JSON.stringify(weightedGraph(), null, 2), function(err) {
-    if(err) {
-        return console.log(err);
-    }
-  }); 
-  console.log("The contribution graph has been regenerated into ./graphData.js")
-  console.log("Run a web server and open the html page to view results")
-  console.log("python -m SimpleHTTPServer & (sleep 5 && open http://localhost:8000/git-contributors/contributors.html) && fg")
-})

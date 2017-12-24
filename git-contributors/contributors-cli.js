@@ -132,7 +132,7 @@ glob(repo_list + "/*/.git", function(err, files) {
       }
     }
   }
-  fs.writeFile("./graphData.json", JSON.stringify(weightedGraph(), null, 2), function(err) {
+  fs.writeFile(__dirname + "/graphData.json", JSON.stringify(weightedGraph(), null, 2), function(err) {
     if(err) {
         return console.log(err);
     }
