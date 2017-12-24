@@ -1,44 +1,43 @@
-/* Graphing team collaboration by git contributions
+/* Graphing team connectedness by Slack participation
  *
  * To generate:
- *   Run this file on the command line with a target directory which contains
- *   any number of git repositories. This script will calculate author
- *   contributions and output them as two lists of edges and vertices weighted
- *   by the square root of connections between committers
+ *   Run this file on the command line with a single argument that is a file* containing a Slack api token.
+ *   The users in that Slack account will be graphed by connectedness.
+ *
+ * *avoiding env vars and command line arguments for security
  */
-const { execSync } = require('child_process'); var glob = require('glob');
 var fs = require('fs');
+const { WebClient } = require('@slack/client');
  
 if (process.argv.length <= 2) {
-    console.log("Usage: " + __filename + " path/to/directory");
+    console.log("Usage: " + __filename + " path/to/file/containing/slack/apitoken");
     process.exit(1);
 }
-// cd /first/argument
-var repo_list = process.argv[2]
+var secretfile = process.argv[2]
+var slackToken = fs.readFileSync(secretfile)
 
-
-var contributors = {}
-function addContribution(project, email) {
+var users = {}
+function addConversation(channel, user) {
   // Record a person contributing a commit to a repo
-  if (!contributors[project]) {
-    contributors[project] = {}
+  if (!users[channel]) {
+    users[channel] = {}
   }
-  if (!contributors[project][email]) {
-    contributors[project][email] = 1
+  if (!users[channel][user]) {
+    users[channel][user] = 1
   } else {
-    contributors[project][email]++
+    users[channel][user]++
   }
 }
 
-function emailPairNormalized(email1, email2) {
+function usernamePairNormalized(username1, username2) {
   // Use a consistent key for referencing pairs of emails
-  if (email1 == "" || email2 == "") {
-    console.log(email1, email2)
+  if (username1 == "" || username2 == "") {
+    console.log(username1, username2)
   }
-  if (email1 < email2) {
-    return [email1, email2]
+  if (username1 < username2) {
+    return [username1, username2]
   } else {
-    return [email2, email1]
+    return [username2, username1]
   }
 }
 
@@ -59,35 +58,34 @@ function groupFromEmailDomain(email) {
 }
 
 function weightedGraph() {
-  // Calculate the connections between committers into the same repositories.
-  // Does not record any repository data, only the number of times two people
-  // overlapped within any repository
-  var allCommits = {}
+  // Calculate the min message count of two users into the same channel.
+  // If user1 wrote 12 messages and user2 wrote 15 then their overlap is 12
+  var messageCount = {}
   var connectionCounts = {}
 
   for (var project in contributors) {
-    var commitsForProject = {}
+    var messagesInChannel = {}
     for (var email in contributors[project]) {
-      if (!commitsForProject[email]) {
-        commitsForProject[email] = 0
-        allCommits[email] = 0
+      if (!messagesInChannel[email]) {
+        messagesInChannel[email] = 0
+        messageCount[email] = 0
       }
-      allCommits[email] += contributors[project][email]
-      commitsForProject[email] += contributors[project][email]
+      messageCount[email] += contributors[project][email]
+      messagesInChannel[email] += contributors[project][email]
     }
     // Do a quadratic calculation to find the matrix overlap of all
     // contributors to this project
-    for (var email1 in commitsForProject) {
-      for (var email2 in commitsForProject) {
-        if (email1 != email2) {
-          var key = emailPairNormalized(email1, email2)
+    for (var username1 in messagesInChannel) {
+      for (var username2 in messagesInChannel) {
+        if (username1 != username2) {
+          var key = usernamePairNormalized(username1, username2)
           if (!connectionCounts[key]) {
             connectionCounts[key] = 0
           }
           // The connection between two people is the minimum of their
           // contributions to a single project, calculated for each project and
           // summed
-          connectionCounts[key] += Math.abs(commitsForProject[email1] - commitsForProject[email2])
+          connectionCounts[key] += Math.min(messagesInChannel[username1], messagesInChannel[username2])
         }
       }
     }
@@ -96,11 +94,11 @@ function weightedGraph() {
     nodes: [],
     links: []
   }
-  for (var email in allCommits) {
+  for (var email in messageCount) {
     var node = {
       id: email,
       group: groupFromEmailDomain(email),
-      commits: allCommits[email],
+      commits: messageCount[email],
     }
     graph.nodes.push(node)
   }

@@ -2,6 +2,10 @@
 <meta charset="utf-8">
 <style>
 
+svg {
+  border: 1px solid #AAA;
+}
+
 .links line {
   stroke: #999;
   stroke-opacity: 0.6;
@@ -23,8 +27,8 @@
 <script>
 
 var	margin = {top: 30, right: 20, bottom: 30, left: 50},
-	width = window.visualViewport.width - margin.left - margin.right,
-	height = 1050 - margin.top - margin.bottom;
+	width = window.visualViewport.width - (margin.left + margin.right),
+	height = window.visualViewport.height - (100 + margin.top + margin.bottom);
 
 var	force_graph = d3.select("body")
 	.append("svg")
@@ -66,18 +70,12 @@ drawForceGraph(force_graph)
 function drawForceGraph(svg) {
   var color = d3.scaleOrdinal(d3.schemeCategory20);
 
-  var force = d3.forceManyBody()
-  // Increase the force when near center of screen, lower at edges
-  var forceAtCenter = -200
-  force.strength(updateStrength)
-  function updateStrength(d) {
-    var offset = (Math.abs(d.x) / width) + (Math.abs(d.y) / height)
-    return forceAtCenter * (1 - offset)
-  }
+  var force = d3.forceManyBody().strength(-50)
   var simulation = d3.forceSimulation()
       .force("link", d3.forceLink().id(function(d) { return d.id; }))
       .force("charge", force)
-      .force("center", d3.forceCenter(width / 3, height / 3));
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("center", d3.forceCenter(width / 2, height / 2));
 
   d3.json("graphData.json", function(error, graph) {
     if (error) throw error;
@@ -132,7 +130,6 @@ function drawForceGraph(svg) {
         .distance(300)
 
     function ticked() {
-      force.strength(updateStrength)
       link
           .attr("x1", function(d) { return d.source.x; })
           .attr("y1", function(d) { return d.source.y; })
@@ -140,12 +137,12 @@ function drawForceGraph(svg) {
           .attr("y2", function(d) { return d.target.y; });
 
       node
-          .attr("cx", function(d) { return d.x; })
-          .attr("cy", function(d) { return d.y; });
+          .attr("cx", function(d) { return d.x = Math.max(7, Math.min(width - 7, d.x)) })
+          .attr("cy", function(d) { return d.y = Math.max(7, Math.min(height - 7, d.y)) });
 
       label
-          .attr("x", function(d) { return d.x; })
-          .attr("y", function (d) { return d.y; })
+          .attr("x", function(d) { return d.x + 15 })
+          .attr("y", function(d) { return d.y + 5});
     }
   });
 

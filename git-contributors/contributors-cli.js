@@ -87,7 +87,7 @@ function weightedGraph() {
           // The connection between two people is the minimum of their
           // contributions to a single project, calculated for each project and
           // summed
-          connectionCounts[key] += Math.abs(commitsForProject[email1] - commitsForProject[email2])
+          connectionCounts[key] += Math.min(commitsForProject[email1], commitsForProject[email2])
         }
       }
     }
