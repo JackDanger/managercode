@@ -1,6 +1,4 @@
-var	margin = {top: 30, right: 20, bottom: 30, left: 50},
-	width = window.visualViewport.width - (margin.left + margin.right),
-	height = window.visualViewport.height - (100 + margin.top + margin.bottom);
+(function() {
 
 var	force_graph = d3.select("body")
 	.append("svg")
@@ -46,7 +44,6 @@ function drawForceGraph(svg) {
   var simulation = d3.forceSimulation()
       .force("link", d3.forceLink().id(function(d) { return d.id; }))
       .force("charge", force)
-      .force("center", d3.forceCenter(width / 2, height / 2))
       .force("center", d3.forceCenter(width / 2, height / 2));
 
   d3.json("graphData.json", function(error, graph) {
@@ -65,7 +62,7 @@ function drawForceGraph(svg) {
       .data(graph.nodes)
       .enter()
         .append("circle")
-        .attr("r", function(d) { return 4 + Math.sqrt(d.commits) })
+        .attr("r", function(d) { return 4 + Math.sqrt(d.count) })
         .attr("fill", function(d) { return color(d.group); })
         .call(d3.drag()
             .on("start", dragstarted)
@@ -79,7 +76,7 @@ function drawForceGraph(svg) {
       .enter()
         .append("text")
         .attr("class", "label")
-        .attr("font-size", function(d) { return 14 + Math.log10(d.commits) })
+        .attr("font-size", function(d) { return 14 + Math.log10(d.count) })
         .text(function(d) { return d.id })
         .call(d3.drag()
             .on("start", dragstarted)
@@ -135,4 +132,4 @@ function drawForceGraph(svg) {
     d.fy = null;
   }
 }
-
+})()

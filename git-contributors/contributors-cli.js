@@ -100,7 +100,7 @@ function weightedGraph() {
     var node = {
       id: email,
       group: groupFromEmailDomain(email),
-      commits: allCommits[email],
+      count: allCommits[email],
     }
     graph.nodes.push(node)
   }
@@ -137,7 +137,7 @@ glob(repo_list + "/*/.git", function(err, files) {
         return console.log(err);
     }
   }); 
-  console.log("The contribution graph has been regenerated into ./graphData.js")
+  console.log("The contribution graph has been regenerated into ./" + __dirname + "/graphData.js")
   console.log("Run a web server and open the html page to view results")
-  console.log("python -m SimpleHTTPServer & (sleep 5 && open http://localhost:8000/git-contributors/contributors.html) && fg")
+  console.log("python -m SimpleHTTPServer & (sleep 5 && open http://localhost:8000/" + __dirname + "/index.html) && fg")
 })

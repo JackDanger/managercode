@@ -20,15 +20,13 @@ const client = new WebClient(slackToken, { retryConfig: { maxRequestConcurrency:
 
 const nintyDaysAgo = new Date() - 3600*24*90
 
-const usernameMap = {}
+const userMap = {}
 
 
 client.users.list()
   .then(function(res) {
     res.members.forEach((user) => {
-      if (!user.is_bot && user.name != 'slackbot') {
-        usernameMap[user.id] = user.name
-      }
+      userMap[user.id] = user
     })
   })
   .then(function() {
@@ -38,7 +36,9 @@ client.users.list()
               return client.channels.history(channel.id)
                 .then(function(r) {
                   r.messages.forEach(function(message) {
-                    addMessage(channel.id, message.user)
+                    if (message.user && message.user != 'USLACKBOT') {
+                      addMessage(channel.id, message.user)
+                    }
                   })
                 })
           })
@@ -47,11 +47,12 @@ client.users.list()
         fs.writeFile(__dirname + "/graphData.json", JSON.stringify(weightedGraph(), null, 2), function(err) {
           if(err) { return console.log(err) }
         }); 
-        console.log("The contribution graph has been regenerated into ./slack-activity/graphData.js")
+        console.log("The contribution graph has been regenerated into ./" + __dirname + "/graphData.js")
         console.log("Run a web server and open the html page to view results")
-        console.log("python -m SimpleHTTPServer & (sleep 5 && open http://localhost:8000/git-contributors/contributors.html) && fg")
+        console.log("python -m SimpleHTTPServer & (sleep 5 && open http://localhost:8000/" + __dirname + "/index.html) && fg")
       })
     })
+
 const users = {}
 function addMessage(channel, username) {
   // Record a person contributing a commit to a repo
@@ -113,20 +114,24 @@ function weightedGraph() {
   }
   for (var username in messageCount) {
     var node = {
-      id: usernameMap[username],
+      id: userMap[username].profile.display_name || userMap[username].name,
       group: 1,
-      messages: messageCount[username],
+      count: messageCount[username],
     }
     graph.nodes.push(node)
   }
   for (var key in connectionCounts) {
     var userIdPair = key.split(',')
-    var link = {
-      source: usernameMap[userIdPair[0]],
-      target: usernameMap[userIdPair[1]],
-      value: connectionCounts[key]
+    var user1 = userMap[userIdPair[0]]
+    var user2 = userMap[userIdPair[1]]
+    if (user1.name != 'slackbot' && user2.name != 'slackbot' && !user1.is_bot && !user2.is_bot) {
+      var link = {
+        source: user1.profile.display_name || user1.name,
+        target: user2.profile.display_name || user2.name,
+        value: connectionCounts[key]
+      }
+      graph.links.push(link)
     }
-    graph.links.push(link)
   }
   return graph
 }
