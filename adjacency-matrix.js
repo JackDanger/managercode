@@ -10,7 +10,7 @@ d3.json('graphData.json', function(data) {
   const adjacencyMatrix = d3AdjacencyMatrixLayout();
 
   adjacencyMatrix
-    .size([870,870])
+    .size([width - 100, height - 100])
     .nodes(data.nodes)
     .links(data.links)
     .directed(false)
@@ -23,7 +23,7 @@ d3.json('graphData.json', function(data) {
 
   adjacency_svg
     .append('g')
-      .attr('transform', 'translate(80,80)')
+      .attr('transform', 'translate(120,120)')
       .attr('id', 'adjacencyG')
       .selectAll('rect')
       .data(matrixData)
@@ -87,7 +87,7 @@ function d3AdjacencyMatrixLayout () {
         constructedEdge.target = nodes[edge.target];
       }
 
-      var id = keyPair(nodeID(constructedEdge.source), nodeID(constructedEdge.target));
+      var id = keyPair(constructedEdge.source, constructedEdge.target);
       constructedEdge.id = id
 
       edgeHash[id] = constructedEdge;
@@ -106,6 +106,26 @@ function d3AdjacencyMatrixLayout () {
         };
         if (edgeHash[grid.id]) {
           grid.weight = edgeHash[grid.id].weight;
+        }
+        if (directed === true || b < a) {
+          matrix.push(grid);
+          if (directed === false) {
+            var mirrorGrid = {
+              id: keyPair(nodeID(sourceNode), nodeID(targetNode)),
+              source: sourceNode,
+              target: targetNode,
+              x: xScale(a),
+              y: yScale(b),
+              weight: grid.weight,
+              height: nodeHeight,
+              width: nodeWidth
+            };
+            if (grid.id == 'matthews.sam@gmail.com-victor.hom16@gmail.com') {
+              console.log(edgeHash)
+              console.log(grid)
+            }
+            matrix.push(mirrorGrid);
+          }
         }
       });
     });
@@ -162,7 +182,7 @@ function d3AdjacencyMatrixLayout () {
 
     var xAxis = d3.axisTop().scale(nameScale).tickSize(4);
 
-    calledG.append('g').attr('class', 'am-xAxis am-axis').call(xAxis).selectAll('text').style('text-anchor', 'end').attr('transform', 'translate(-10,-10) rotate(90)');
+    calledG.append('g').attr('class', 'am-xAxis am-axis').call(xAxis).selectAll('text').style('text-anchor', 'end').attr('transform', 'translate(-0,-10) rotate(90)');
   };
 
   matrix.yAxis = function (calledG) {
