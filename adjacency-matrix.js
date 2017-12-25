@@ -4,9 +4,13 @@ var	adjacency_svg = d3.select("body")
 	.append("svg")
 		.attr("width", width)
 		.attr("height", height)
+var adjacency = adjacency_svg
+	.append("g")
+		.attr("width", width)
+		.attr("height", height)
 
 d3.json('graphData.json', function(data) {
-  data.nodes.sort(function(a, b) { return d3.descending(a.count, b.count) } )
+  data.nodes.sort(function(a, b) { return b.weight < a.weight } )
   const adjacencyMatrix = d3AdjacencyMatrixLayout();
 
   adjacencyMatrix
@@ -21,30 +25,40 @@ d3.json('graphData.json', function(data) {
   const someColors = d3.scaleOrdinal()
     .range(d3.schemeCategory20b);
 
-  adjacency_svg
-    .append('g')
-      .attr('transform', 'translate(120,120)')
-      .attr('id', 'adjacencyG')
-      .selectAll('rect')
-      .data(matrixData)
-      .enter()
-      .append('rect')
-        .attr('width', d => d.width)
-        .attr('height', d => d.height)
-        .attr('x', d => d.x)
-        .attr('y', d => d.y)
-        .style('stroke', 'black')
-        .style('stroke-width', '1px')
-        .style('stroke-opacity', .1)
-        .style('fill', d => someColors(d.source.group))
-        .attr('weight', d => d.weight)
-        .style('fill-opacity', d => 1 - (1 / (d.weight || 1)));
+  adjacency
+    .append("g")
+    .attr('transform', 'translate(120,120)')
+    .attr('id', 'adjacencyG')
+    .selectAll('rect')
+    .data(matrixData)
+    .enter()
+    .append('rect')
+      .attr('width', d => d.width)
+      .attr('height', d => d.height)
+      .attr('x', d => d.x)
+      .attr('y', d => d.y)
+      .style('stroke', 'black')
+      .style('stroke-width', '1px')
+      .style('stroke-opacity', .1)
+      .style('fill', d => someColors(d.source.group))
+      .attr('weight', d => d.weight)
+      .style('fill-opacity', d => 1 - (1 / (d.weight || 1)));
 
   d3.select('#adjacencyG')
     .call(adjacencyMatrix.xAxis);
 
   d3.select('#adjacencyG')
     .call(adjacencyMatrix.yAxis);
+
+  adjacency.append("rect")
+      .attr("fill", "none")
+      .attr("pointer-events", "all")
+      .attr("width", width)
+      .attr("height", height)
+      .call(d3.zoom()
+          .scaleExtent([-100, 100])
+          .on("zoom", function() { adjacency.attr("transform", d3.event.transform) }));
+
 })
 
 function d3AdjacencyMatrixLayout () {
@@ -177,15 +191,15 @@ function d3AdjacencyMatrixLayout () {
   };
 
   matrix.xAxis = function (calledG) {
-    var nameScale = d3.scalePoint().domain(nodes.map(nodeID)).range([0, size[0]]).padding(1);
+    var nameScale = d3.scalePoint().domain(nodes.map(nodeID)).range([1, size[0]]).padding(5);
 
     var xAxis = d3.axisTop().scale(nameScale).tickSize(4);
 
-    calledG.append('g').attr('class', 'am-xAxis am-axis').call(xAxis).selectAll('text').style('text-anchor', 'end').attr('transform', 'translate(-0,-10) rotate(90)');
+    calledG.append('g').attr('class', 'am-xAxis am-axis').call(xAxis).selectAll('text').style('text-anchor', 'end').attr('transform', 'translate(-10,-10) rotate(90)');
   };
 
   matrix.yAxis = function (calledG) {
-    var nameScale = d3.scalePoint().domain(nodes.map(nodeID)).range([0, size[1]]).padding(1);
+    var nameScale = d3.scalePoint().domain(nodes.map(nodeID)).range([2, size[1] + 2]).padding(5);
 
     var yAxis = d3.axisLeft().scale(nameScale).tickSize(4);
 

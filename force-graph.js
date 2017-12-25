@@ -1,41 +1,24 @@
 (function() {
 
-var	force_graph = d3.select("body")
+var	force_graph_svg = d3.select("body")
 	.append("svg")
 		.attr("width", width)
 		.attr("height", height)
-
-var zoom = d3.zoom()
-    .scaleExtent([1, 40])
-    .translateExtent([[-100, -100], [width + 90, height + 100]])
-    .on("zoom", zoomed);
-
-var drag = d3.drag()
-    .on("start", dragstarted)
-    .on("drag", dragged)
-    .on("end", dragended);
-
-function zoomed() {
-  force_graph.attr("transform", d3.event.transform);
-}
-function dragstarted(d) {
-  d3.event.sourceEvent.stopPropagation();
-  d3.select(this).classed("dragging", true);
-}
-function dragged(d) {
-  d3.select(this).attr("cx", d.x = d3.event.x).attr("cy", d.y = d3.event.y);
-}
-function dragended(d) {
-  d3.select(this).classed("dragging", false);
-}
-
-force_graph
-    .call(zoom)
-    .call(drag)
-    .on("wheel", function() { d3.event.preventDefault(); })
-    .on("zoom", zoomed);
+var force_graph = force_graph_svg
+    .append("g")
+      .attr("width", width)
+      .attr("height", height)
 
 drawForceGraph(force_graph)
+
+force_graph.append("rect")
+    .attr("fill", "none")
+    .attr("pointer-events", "all")
+    .attr("width", width)
+    .attr("height", height)
+    .call(d3.zoom()
+        .scaleExtent([-100, 100])
+        .on("zoom", function() { force_graph.attr("transform", d3.event.transform) }));
 
 function drawForceGraph(svg) {
   var color = d3.scaleOrdinal(d3.schemeCategory20);
