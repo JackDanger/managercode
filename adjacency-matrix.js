@@ -10,7 +10,7 @@ d3.json('graphData.json', function(data) {
   const adjacencyMatrix = d3AdjacencyMatrixLayout();
 
   adjacencyMatrix
-    .size([width - 100, height - 100])
+    .size([width - 200, height - 100])
     .nodes(data.nodes)
     .links(data.links)
     .directed(false)
@@ -37,7 +37,8 @@ d3.json('graphData.json', function(data) {
         .style('stroke-width', '1px')
         .style('stroke-opacity', .1)
         .style('fill', d => someColors(d.source.group))
-        .style('fill-opacity', d => 1 - (1 / d.weight));
+        .attr('weight', d => d.weight)
+        .style('fill-opacity', d => 1 - (1 / (d.weight || 1)));
 
   d3.select('#adjacencyG')
     .call(adjacencyMatrix.xAxis);
@@ -106,6 +107,8 @@ function d3AdjacencyMatrixLayout () {
         };
         if (edgeHash[grid.id]) {
           grid.weight = edgeHash[grid.id].weight;
+        } else {
+          grid.weight = 0;
         }
         if (directed === true || b < a) {
           matrix.push(grid);
@@ -120,10 +123,6 @@ function d3AdjacencyMatrixLayout () {
               height: nodeHeight,
               width: nodeWidth
             };
-            if (grid.id == 'matthews.sam@gmail.com-victor.hom16@gmail.com') {
-              console.log(edgeHash)
-              console.log(grid)
-            }
             matrix.push(mirrorGrid);
           }
         }
