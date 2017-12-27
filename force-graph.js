@@ -89,8 +89,8 @@ function drawForceGraph(svg) {
           .attr("y2", function(d) { return d.target.y; });
 
       node
-          .attr("cx", function(d) { return d.x = Math.max(7, Math.min(width - 7, d.x)) })
-          .attr("cy", function(d) { return d.y = Math.max(7, Math.min(height - 7, d.y)) });
+          .attr("cx", function(d) { return d.x })
+          .attr("cy", function(d) { return d.y });
 
       label
           .attr("x", function(d) { return d.x + 15 })
