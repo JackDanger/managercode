@@ -7,19 +7,24 @@ clone_org() {
   # updates them if they are already cloned
   local organization=$1
   local checkout_location=$2
-  curl -s "https://api.github.com/orgs/${organization}/repos?per_page=1000&type=sources" |
-    jq '.[] | .full_name' |
-    sed 's/"//g' |
-    while read repo; do
-      # ${repo} ~= mapbox/Simple-KML
-      if [[ -d /${repo} ]]; then
-        echo "Updating ${repo}"
-        cd ${checkout_location}/${repo}/
-        git pull --recurse-submodules
-      else
-        echo "Cloning ${repo}"
-        git clone --recursive https://github.com/${repo}.git ${checkout_location}/${repo}
-      fi
+  local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
+  for page in $(seq $total_pages); do
+    set -x
+    curl -s "https://api.github.com/orgs/${organization}/repos?page=${page}&type=sources" |
+      jq '.[] | .full_name' |
+      sed 's/"//g' |
+      while read repo; do
+        set +x
+        # ${repo} ~= mapbox/Simple-KML
+        if [[ -d /${repo} ]]; then
+          echo "Updating ${repo}"
+          cd ${checkout_location}/${repo}/
+          git pull --recurse-submodules
+        else
+          echo "Cloning ${repo}"
+          git clone --recursive https://github.com/${repo}.git ${checkout_location}/${repo}
+        fi
+      done
   done
 }
 
