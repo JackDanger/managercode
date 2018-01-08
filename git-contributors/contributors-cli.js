@@ -10,7 +10,7 @@ const { execSync } = require('child_process'); var glob = require('glob');
 var fs = require('fs');
  
 if (process.argv.length <= 2) {
-    console.log("Usage: " + __filename + " path/to/directory");
+    console.log(`Usage: ${__filename} path/to/directory`);
     process.exit(1);
 }
 // cd /first/argument
@@ -192,7 +192,7 @@ glob(repo_list + "/*/.git", function(err, files) {
       }
     }
     catch(e) {
-      console.error("Command failed in " + basedir + ": " + cmd)
+      console.error(`Command failed in ${basedir}: ${cmd}`)
     }
   }
   fs.writeFile(__dirname + "/contributorGraphData.json", JSON.stringify(contributorWeightedGraph(), null, 2), function(err) {
