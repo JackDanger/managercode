@@ -1,3 +1,5 @@
 node_modules
 slack.token
 graphData.json
+contributorGraphData.json
+repoGraphData.json
