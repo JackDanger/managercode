@@ -71,7 +71,7 @@ function drawForceGraph(svg, graph) {
       .append("text")
       .attr("class", "label")
       .attr("font-size", function(d) { return 14 + Math.log10(d.count) })
-      .text(function(d) { return d.id })
+      .text(function(d) { return d.id.split('@')[0] })
       .call(d3.drag()
           .on("start", dragstarted)
           .on("drag", dragged)
@@ -80,7 +80,7 @@ function drawForceGraph(svg, graph) {
   node.append("text")
       .attr("dx", 0)
       .attr("dy", ".65em")
-      .text(function(d) { return d.id })
+      .text(function(d) { return d.id.split('@')[0] })
       .style("font-size", "20px")
       .style("fill", "#4393c3");
 
@@ -90,7 +90,7 @@ function drawForceGraph(svg, graph) {
 
   simulation.force("link")
       .links(graph.links)
-      .distance(300)
+      .distance(200)
 
   function ticked() {
     link

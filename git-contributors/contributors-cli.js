@@ -17,12 +17,21 @@ if (process.argv.length <= 2) {
 var repo_list = process.argv[2]
 
 
+const dedupes = {
+  // TODO: support a command-line flag and argument that accepts a filename
+  // full of key-value pairs of emails for deduping.
+  'jackdanger@users.noreply.github.com': 'danger@mapbox.com',
+}
+
 var contributors = {}
 function addContribution(project, email) {
   // Record a person contributing a commit to a repo
   // Use the basedir name of the project as the key
   var parts = project.split('/')
   projectName = parts[parts.length - 1]
+  if (dedupes[email]) {
+    email = dedupes[email]
+  }
   if (!contributors[projectName]) {
     contributors[projectName] = {}
   }
