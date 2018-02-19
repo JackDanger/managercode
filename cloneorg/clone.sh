@@ -7,10 +7,10 @@ clone_org() {
   # updates them if they are already cloned
   local organization=$1
   local checkout_location=$2
-  local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
+  local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -H "Authorization: token ${gh_token}" -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
   for page in $(seq $total_pages); do
     set -x
-    curl -s "https://api.github.com/orgs/${organization}/repos?page=${page}&type=sources" |
+    curl -s "https://api.github.com/orgs/${organization}/repos?page=${page}&type=sources" -H "Authorization: token ${gh_token}" |
       jq '.[] | .full_name' |
       sed 's/"//g' |
       while read repo; do
@@ -22,7 +22,7 @@ clone_org() {
           git pull --recurse-submodules
         else
           echo "Cloning ${repo}"
-          git clone --recursive https://github.com/${repo}.git ${checkout_location}/${repo}
+          git clone --recursive git@github.com:${repo}.git ${checkout_location}/${repo}
         fi
       done
   done
