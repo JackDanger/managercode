@@ -5,15 +5,16 @@
 clone_org() {
   # Clones all public repos for a github organization
   # updates them if they are already cloned
+  set -x
   local organization=$1
   local checkout_location=$2
-  if [[ -z $gh_token ]]; then
-    local header="-H 'Authorization: token ${gh_token}'"
+  if [[ -n $gh_token ]]; then
+    authorization="Authorization: token ${gh_token}"
   fi
-  local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" ${header} -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
+  local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -H "${authorization}" -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
   for page in $(seq $total_pages); do
     set -x
-    curl -s "https://api.github.com/orgs/${organization}/repos?page=${page}&type=sources" ${header} |
+    curl -s "https://api.github.com/orgs/${organization}/repos?page=${page}&type=sources" -H "${authorization}" |
       jq '.[] | .full_name' |
       sed 's/"//g' |
       while read repo; do
