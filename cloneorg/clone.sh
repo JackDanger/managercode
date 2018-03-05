@@ -26,7 +26,7 @@ clone_org() {
           git pull --recurse-submodules
         else
           echo "Cloning ${repo}"
-          if [[ -z $gh_token ]]; then
+          if [[ -n $gh_token ]]; then
             git clone --recursive git@github.com:${repo}.git ${checkout_location}/${repo}
           else
             git clone --recursive https://github.com/${repo}.git ${checkout_location}/${repo}
