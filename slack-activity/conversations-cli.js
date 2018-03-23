@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /* Graphing team connectedness by Slack participation
  *
  * To generate:
@@ -6,41 +7,58 @@
  *
  * *avoiding env vars and command line arguments for security
  */
-var fs = require('fs');
-var Promise = require('bluebird');
+const fs = require('fs');
+const os = require('os');
+const Promise = require('bluebird');
 const { WebClient } = require('@slack/client');
+var slackToken;
 
-if (process.argv.length <= 2) {
-    console.log("Usage: " + __filename + " path/to/file/containing/slack/apitoken");
-    process.exit(1);
+if (process.env.SLACK_TOKEN) {
+  slackToken = process.env.SLACK_TOKEN
+} else {
+  if (process.argv.length <= 2) {
+      console.log("Usage: " + __filename + " path/to/file/containing/slack/apitoken");
+      process.exit(1);
+  }
+  var secretfile = process.argv[2]
+  slackToken = fs.readFileSync(secretfile)
 }
-var secretfile = process.argv[2]
-const slackToken = fs.readFileSync("./slack.token")
-const client = new WebClient(slackToken, { retryConfig: { maxRequestConcurrency: 10 }})
+const client = new WebClient(slackToken)
 
 const nintyDaysAgo = new Date() - 3600*24*90
+
+var onlyTheseEmails;
+if (process.env.ONLY_THESE_EMAILS) {
+  onlyTheseEmails = JSON.parse(process.env.ONLY_THESE_EMAILS)
+  console.log("scoping to only", onlyTheseEmails.length, "email addresses")
+}
 
 const userMap = {}
 
 
 client.users.list()
   .then(function(res) {
-    res.members.forEach((user) => {
-      userMap[user.id] = user
-    })
+    res.members.forEach((user) => { userMap[user.id] = user })
   })
   .then(function() {
     client.channels.list()
-      .then(function(res) {
-          return Promise.map(res.channels, function(channel) {
-              return client.channels.history(channel.id)
-                .then(function(r) {
-                  r.messages.forEach(function(message) {
-                    if (message.user && message.user != 'USLACKBOT') {
-                      addMessage(channel.id, message.user)
-                    }
-                  })
-                })
+      .then((res) => {
+        return res.channels
+      })
+      .mapSeries((channel) => {
+        return client.channels.history(channel.id)
+          .then(function(r) {
+            console.log("start")
+            var i = 0;
+            while (i < 1000000000) {
+              i++
+            }
+            console.log("iterated")
+            r.messages.forEach(function(message) {
+              if (message.user && message.user != 'USLACKBOT') {
+                addMessage(channel.id, message.user)
+              }
+            })
           })
       })
       .then(function() {
@@ -55,6 +73,14 @@ client.users.list()
 
 const users = {}
 function addMessage(channel, username) {
+  // Check if we're limiting to only a subset of users
+  if (onlyTheseEmails) {
+    for (var email in onlyTheseEmails) {
+      if (userMap[username].email == email) {
+        return
+      }
+    }
+  }
   // Record a person contributing a commit to a repo
   if (!users[channel]) {
     users[channel] = {}

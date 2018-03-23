@@ -6,9 +6,10 @@
   "author": "Jack Danger (https://jackdanger.com)",
   "license": "MIT",
   "dependencies": {
-    "glob": "^7.x.x",
     "@slack/client": "^3.x.x",
-    "bluebird": "^3.x.x"
+    "bluebird": "^3.x.x",
+    "glob": "^7.x.x",
+    "promise": "^8.0.1"
   },
   "bin": {
     "git": "git-contributions/contributions-cli.js",

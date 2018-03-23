@@ -1,5 +1,7 @@
 (function() {
 
+let params = new URLSearchParams(location.search.slice(1));
+
 var	contributor_force_graph_svg = d3.select("body")
 	.append("svg")
 		.attr("width", width)
@@ -10,17 +12,30 @@ var	repo_force_graph_svg = d3.select("body")
 		.attr("width", width)
 		.attr("height", height)
 
-d3.json("contributorGraphData.json", function(error, graph) {
-  if (error) throw error;
-  drawForceGraph(contributor_force_graph_svg, graph)
-})
+//d3.json("contributorGraphData.json", function(error, graph) {
+//  if (error) throw error;
+//  drawForceGraph(contributor_force_graph_svg, graph)
+//})
 
-d3.json("repoGraphData.json", function(error, graph) {
+d3.json("graphData.json", function(error, graph) {
   if (error) throw error;
   drawForceGraph(repo_force_graph_svg, graph)
 })
 
 function drawForceGraph(svg, graph) {
+  // Adjust the minimum link required in the graph data
+  const minLink = params.get('minLink') || 0
+
+  var links = [];
+  for (var i in graph.links) {
+    if (graph.links[i].value > minLink) {
+      graph.links[i].value = graph.links[i].value - minLink
+      links.push(graph.links[i])
+    }
+  }
+  graph.links = links
+  console.log("trimmed graph size: ", graph.links.length, graph.nodes.length)
+
   var force_graph = svg
       .append("g")
         .attr("width", width)
