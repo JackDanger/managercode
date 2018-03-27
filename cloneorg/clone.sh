@@ -8,12 +8,10 @@ clone_org() {
   local organization=$1
   local checkout_location=$2
   if [[ -n $gh_token ]]; then
-    set -x
     authorization="Authorization: token ${gh_token}"
   fi
   local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -H "${authorization}" -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
 
-  set -x
   for page in $(seq $total_pages); do
     echo "Cloning page ${page}"
     _clone_page "${organization}" "${checkout_location}" "${page}" "${authorization}"
@@ -21,7 +19,6 @@ clone_org() {
 }
 
 _clone_page() {
-  set -x
   local organization=$1
   local checkout_location=$2
   local page=$3
