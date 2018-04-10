@@ -1,23 +1,13 @@
 (function() {
 
-var	contributor_force_graph_svg = d3.select("body")
+var	force_graph_svg = d3.select("body")
 	.append("svg")
 		.attr("width", width)
 		.attr("height", height)
 
-var	repo_force_graph_svg = d3.select("body")
-	.append("svg")
-		.attr("width", width)
-		.attr("height", height)
-
-d3.json("contributorGraphData.json", function(error, graph) {
+d3.json("graphData.json", function(error, graph) {
   if (error) throw error;
-  drawForceGraph(contributor_force_graph_svg, graph)
-})
-
-d3.json("repoGraphData.json", function(error, graph) {
-  if (error) throw error;
-  drawForceGraph(repo_force_graph_svg, graph)
+  drawForceGraph(force_graph_svg, graph)
 })
 
 function drawForceGraph(svg, graph) {
@@ -48,7 +38,7 @@ function drawForceGraph(svg, graph) {
     .selectAll("line")
     .data(graph.links)
     .enter().append("line")
-      .attr("stroke-width", function(d) { return Math.log10(d.value); });
+      .attr("stroke-width", function(d) { return 0.5 + Math.log10(d.value); });
 
   var node = svg.append("g")
     .attr("class", "node")

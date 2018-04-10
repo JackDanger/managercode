@@ -3,3 +3,4 @@ slack.token
 graphData.json
 contributorGraphData.json
 repoGraphData.json
+*.gen
