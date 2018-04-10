@@ -7,10 +7,15 @@ clone_org() {
   # updates them if they are already cloned
   local organization=$1
   local checkout_location=$2
-  if [[ -n $gh_token ]]; then
-    authorization="Authorization: token ${gh_token}"
+  if [[ -n $GITHUB_TOKEN ]]; then
+    authorization="Authorization: token ${GITHUB_TOKEN}"
   fi
   local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -H "${authorization}" -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
+  if [[ "${total_pages}" == "" ]];then
+    1>&2 echo "Authorization required"
+    1>&2 echo "set the GITHUB_TOKEN environment variable"
+    exit 1
+  fi
 
   for page in $(seq $total_pages); do
     echo "Cloning page ${page}"
@@ -33,7 +38,7 @@ _clone_page() {
         git pull --recurse-submodules &
       else
         echo "Cloning ${repo}"
-        if [[ -z $gh_token ]]; then
+        if [[ -z "${GITHUB_TOKEN}" ]]; then
           git clone --recursive git@github.com:${repo}.git ${checkout_location}/${repo} &
         else
           git clone --recursive https://github.com/${repo}.git ${checkout_location}/${repo} &
@@ -68,13 +73,13 @@ case $1 in
     recent_work $2
     exit 0
     ;;
-  *)
-    [[ -z "$3" ]] && usage
-    clone_org $2 $3
-    exit 0
-    ;;
   "")
     usage
+    ;;
+  *)
+    [[ -z "$2" ]] && usage
+    clone_org $1 $2
+    exit 0
     ;;
   esac
 usage
