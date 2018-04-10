@@ -57,20 +57,20 @@ recent_work() {
 
 usage() {
   echo "Usage:"
-  echo "$0 clone_org some_github_org /repo/path"
-  echo "$0 recent_work /repo/path"
+  echo "$0 SOME_GITHUB_ORG /repo/path"
+  echo "$0 'recent' /repo/path"
   exit 1
 }
 
 case $1 in
-  "clone_org")
-    [[ -z "$3" ]] && usage
-    clone_org $2 $3
-    exit 0
-    ;;
-  "recent_work")
+  "recent")
     [[ -z "$2" ]] && usage
     recent_work $2
+    exit 0
+    ;;
+  *)
+    [[ -z "$3" ]] && usage
+    clone_org $2 $3
     exit 0
     ;;
   "")
