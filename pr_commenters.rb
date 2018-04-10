@@ -3,12 +3,8 @@ require 'github_api'
 require 'json'
 require 'pry'
 
-ONE_YEAR_AGO = (Date.today - 356).to_s
-ONE_MONTH_AGO = (Date.today - 30).to_s
-ONE_DAY_AGO = (Date.today - 1).to_s
-
 def usage
-  puts "Usage: GITHUB_TOKEN=abc123... #{$0} GITHUB_ORGANIZATION REPO"
+  puts "Usage: GITHUB_TOKEN=abc123... #{$0} GITHUB_ORGANIZATION REPO datestamp-to-start-from"
   exit 1
 end
 
@@ -18,6 +14,8 @@ org = ARGV.shift
 usage unless org
 repo = ARGV.shift
 usage unless repo
+since = ARGV.shift
+usage unless since
 
 GithubClient = Github.new(oauth_token: github_token)
 
@@ -59,7 +57,7 @@ end
 # This is a low-tech approach to streaming JSON to STDOUT
 puts "["
 is_first = true
-extract_reviews(org, repo, ONE_DAY_AGO) do |review|
+extract_reviews(org, repo, since) do |review|
   puts "," unless is_first
   is_first = false
   puts review.to_json
