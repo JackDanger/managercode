@@ -16,21 +16,27 @@ function main() {
     exit 1
   fi
 
-  local parameterized_name=$(echo ${name} | tr -cd '[[:alpha:]] ' | tr ' ' '-')
+  local parameterized_name=$(echo ${name} | tr -cd '[[:alpha:]]- ' | tr ' ' '-')
 
-  local tmpdir=${parameterized_name}.gen
-  mkdir -p $tmpdir
-  cp ${filename} ${tmpdir}/graphData.json
-  cp index.html.template ${tmpdir}/index.html
-  cp force-graph.js ${tmpdir}/
-  cp adjacency-matrix.js ${tmpdir}/
-  cp d3*.js ${tmpdir}/
+  local deploy_dir=${parameterized_name}.gen
 
-  pushd $tmpdir
-  python3 -m http.server 5050 &
-  sleep 2
-  open http://localhost:5050/index.html
-  popd
+  # make a copy of all assets into this new subdirectory
+  mkdir -p $deploy_dir
+  cp ${filename} ${deploy_dir}/graphData.json
+  cp index.html.template ${deploy_dir}/index.html
+  cp force-graph.js ${deploy_dir}/
+  cp adjacency-matrix.js ${deploy_dir}/
+  cp d3*.js ${deploy_dir}/
+
+  # Start the server
+  if nc -z localhost 5050; then
+    echo "Server is already running"
+  else
+    echo "Starting webserver"
+    python3 -m http.server 5050 &
+    sleep 2
+  fi
+  open http://localhost:5050/${deploy_dir}/index.html
 }
 
 main "${@}"

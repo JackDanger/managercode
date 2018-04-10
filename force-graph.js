@@ -5,8 +5,22 @@ var	force_graph_svg = d3.select("body")
 		.attr("width", width)
 		.attr("height", height)
 
+// optionally trim the edges to include only edges of a minimum_weight:
+// http://this.page/?trim_below=3
+var trim_below = window.location.search.match(/trim_below=(\d+)/)[1]
+
 d3.json("graphData.json", function(error, graph) {
   if (error) throw error;
+  if (trim_below) {
+    var truncated_links = []
+    for (var i in graph.links) {
+      var link = graph.links[i]
+      if (link.value > 1) {
+        truncated_links.push(link)
+      }
+    }
+    graph.links = truncated_links;
+  }
   drawForceGraph(force_graph_svg, graph)
 })
 

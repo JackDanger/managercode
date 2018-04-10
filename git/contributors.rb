@@ -10,26 +10,26 @@ class Contributors
     @dir_containing_repos = dir_containing_repos
     @since = since
 
-    @contributors = Hash.new { |h1, k1| h1[k1] = Hash.new { |h2, k2| h2[k2] = 0 } }
+    @contributors = {}
   end
 
   # Calculate the connections between repos by how many authors they share.
-  def file_weighted_graph
+  def repo_connections_weighted_graph
     read_all_git_repos('repos')
     graph_links_between_git_objects
   end
 
-  # Calculate the connections between files by how many authors they share.
-  def file_weighted_graph
+  # Calculate the connections between files across all repos by how many authors they share.
+  def file_connections_weighted_graph
     read_all_git_repos('files')
-    graph_links_between_git_objects
+    graph_links_between_git_objects('files')
   end
 
   # Calculate the connections between committers into the same repositories.
   # Does not record any repository data, only the number of times two people
   # overlapped within any repository
-  def contributor_weighted_graph
-    read_all_git_repos
+  def contributor_connections_weighted_graph
+    read_all_git_repos('files')
 
     all_commits = Hash.new { |h, k| h[k] = 0 }
     connection_counts = Hash.new { |h, k| h[k] = 0 }
@@ -54,7 +54,7 @@ class Contributors
 
   private
 
-  def graph_links_between_git_objects
+  def graph_links_between_git_objects(scope='repo')
     all_commits = Hash.new { |h, k| h[k] = 0 }
     connection_counts = Hash.new { |h, k| h[k] = 0 }
     @contributors.each do |obj, emails|
@@ -62,8 +62,9 @@ class Contributors
         all_commits[obj] += count
       end
     end
+
     # Do a quadratic calculation to find the number of shared contributors
-    # this file has.
+    # this object (file or repo) has.
     @contributors.keys.combination(2).each do |obj_pair|
       @contributors[obj_pair.first].keys.each do |email|
         if @contributors[obj_pair.last][email]
@@ -89,14 +90,14 @@ class Contributors
         id: key,
         group: group_from_email_domain(key),
         count: count,
-      }
+      } if count > 0
     end
     connection_counts.each do |pair, count|
       graph[:links] << {
         source: pair.first,
         target: pair.last,
         value: count,
-      }
+      } if count > 0
     end
     graph
   end
@@ -104,7 +105,8 @@ class Contributors
   def read_all_git_repos(scope='repo')
     return if @processed
 
-    # This will generate output in the following format:
+    # If `scope` == 'file' the cmd will generate output in the following
+    # format:
     #
     #    BREAK: github@jackcanty.com
     #    
@@ -123,7 +125,7 @@ class Contributors
       basename = File.basename(dir)
       email = nil
       Dir.chdir(dir) do
-        if scope == 'file'
+        if scope == 'files'
           cmd = "git log --name-only --format='BREAK: %ae' --since='#{since}'"
           %x|#{cmd}|.each_line do |line|
             if line =~ /^BREAK: /
@@ -132,9 +134,11 @@ class Contributors
               # skip
             else
               next if IGNORE_EMAILS.include?(email)
-              full_path = File.join(basename, line)
+              full_path = File.join(basename, line.chomp)
               ## Uncomment to show verbose logging
               # warn "#{email} -> #{full_path}"
+              @contributors[full_path] ||= {}
+              @contributors[full_path][email] ||= 0
               @contributors[full_path][email] += 1
             end
           end
@@ -145,6 +149,8 @@ class Contributors
             next if IGNORE_EMAILS.include?(email)
             ## Uncomment to show verbose logging
             # warn "#{email} -> #{basename}"
+            @contributors[basename] ||= {}
+            @contributors[basename][email] ||= 0
             @contributors[basename][email] += 1
           end
         end
@@ -204,11 +210,11 @@ contributors = Contributors.new(options[:dir_containing_repos], options[:since])
 
 case options[:type]
 when 'contributors'
-  puts contributors.contributor_weighted_graph.to_json
+  puts contributors.contributor_connections_weighted_graph.to_json
 when 'repos'
-  puts contributors.repo_weighted_graph.to_json
+  puts contributors.repo_connections_weighted_graph.to_json
 when 'files'
-  puts contributors.file_weighted_graph.to_json
+  puts contributors.file_connections_weighted_graph.to_json
 else
   raise "Unknown calculation type: #{options[:type]}. Valid options are 'contributors' and 'files'"
 end
