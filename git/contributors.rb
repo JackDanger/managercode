@@ -2,6 +2,8 @@ require 'slop'
 require 'json'
 require 'pry'
 
+IGNORE_EMAILS = ENV['IGNORE_EMAILS'].to_s.split(',')
+
 class Contributors
   attr_reader :dir_containing_repos, :since
   def initialize(dir_containing_repos, since)
@@ -12,29 +14,15 @@ class Contributors
   end
 
   # Calculate the connections between repos by how many authors they share.
-  def repo_weighted_graph
-    read_all_git_repos
-    all_commits = Hash.new { |h, k| h[k] = 0 }
-    connection_counts = Hash.new { |h, k| h[k] = 0 }
-    @contributors.each do |project, emails|
-      emails.each do |email, count|
-        all_commits[project] += count
-      end
-    end
-    # Do a quadratic calculation to find the number of shared contributors
-    # this repo has.
-    @contributors.keys.combination(2).each do |project_pair|
-      @contributors[project_pair.first].keys.each do |email|
-        if @contributors[project_pair.last][email]
-          connection_counts[project_pair] += [
-            @contributors[project_pair.first][email],
-            @contributors[project_pair.last][email],
-          ].min
-        end
-      end
-    end
+  def file_weighted_graph
+    read_all_git_repos('repos')
+    graph_links_between_git_objects
+  end
 
-    graph_for(all_commits, connection_counts)
+  # Calculate the connections between files by how many authors they share.
+  def file_weighted_graph
+    read_all_git_repos('files')
+    graph_links_between_git_objects
   end
 
   # Calculate the connections between committers into the same repositories.
@@ -46,7 +34,7 @@ class Contributors
     all_commits = Hash.new { |h, k| h[k] = 0 }
     connection_counts = Hash.new { |h, k| h[k] = 0 }
 
-    @contributors.each do |project, emails|
+    @contributors.each do |file, emails|
       emails.each do |email, count|
         all_commits[email] += count
       end
@@ -55,8 +43,8 @@ class Contributors
       emails.keys.combination(2).each do |email_pair|
         key = email_pair_normalized(*email_pair)
         connection_counts[key] += [
-          @contributors[project][email_pair.first],
-          @contributors[project][email_pair.last],
+          @contributors[file][email_pair.first],
+          @contributors[file][email_pair.last],
         ].min
       end
     end
@@ -65,6 +53,30 @@ class Contributors
   end
 
   private
+
+  def graph_links_between_git_objects
+    all_commits = Hash.new { |h, k| h[k] = 0 }
+    connection_counts = Hash.new { |h, k| h[k] = 0 }
+    @contributors.each do |obj, emails|
+      emails.each do |email, count|
+        all_commits[obj] += count
+      end
+    end
+    # Do a quadratic calculation to find the number of shared contributors
+    # this file has.
+    @contributors.keys.combination(2).each do |obj_pair|
+      @contributors[obj_pair.first].keys.each do |email|
+        if @contributors[obj_pair.last][email]
+          connection_counts[obj_pair] += [
+            @contributors[obj_pair.first][email],
+            @contributors[obj_pair.last][email],
+          ].min
+        end
+      end
+    end
+
+    graph_for(all_commits, connection_counts)
+  end
 
   def graph_for(all_commits, connection_counts)
     graph = {
@@ -89,32 +101,62 @@ class Contributors
     graph
   end
 
-  def read_all_git_repos
+  def read_all_git_repos(scope='repo')
     return if @processed
-    cmd = "git log --format='%ae' --since='#{since}'"
+
+    # This will generate output in the following format:
+    #
+    #    BREAK: github@jackcanty.com
+    #    
+    #    .ruby-version
+    #    Gemfile
+    #    Gemfile.lock
+    #    pr_commenters.rb
+    #    BREAK: github@jackcanty.com
+    #    
+    #    drive/Gemfile
+    #    drive/Gemfile.lock
+    #    drive/app.rb
+
     Dir[dir_containing_repos + '/*/.git'].each do |git_dir|
       dir = File.dirname(git_dir)
       basename = File.basename(dir)
+      email = nil
       Dir.chdir(dir) do
-        %x|#{cmd}|.each_line do |sha|
-          add_contribution(basename, sha.chomp)
+        if scope == 'file'
+          cmd = "git log --name-only --format='BREAK: %ae' --since='#{since}'"
+          %x|#{cmd}|.each_line do |line|
+            if line =~ /^BREAK: /
+              email = line.split('BREAK: ').last.chomp
+            elsif line =~ /^\s$/
+              # skip
+            else
+              next if IGNORE_EMAILS.include?(email)
+              full_path = File.join(basename, line)
+              ## Uncomment to show verbose logging
+              # warn "#{email} -> #{full_path}"
+              @contributors[full_path][email] += 1
+            end
+          end
+        else
+          cmd = "git log --format='%ae' --since='#{since}'"
+          %x|#{cmd}|.each_line do |line|
+            email = line.chomp
+            next if IGNORE_EMAILS.include?(email)
+            ## Uncomment to show verbose logging
+            # warn "#{email} -> #{basename}"
+            @contributors[basename][email] += 1
+          end
         end
       end
     end
     @processed = true
   end
 
-  def add_contribution(project, email)
-    parts = project.split('/')
-    project_name = parts.last
-
-    @contributors[project_name][email] += 1
-  end
-
   def group_from_email_domain(email)
     @email_domains ||= {}
     parts = email.split('@')
-    # Incalculable case
+    # The incalculable case:
     return 1 if parts.size < 2
     domain = parts.last
 
@@ -142,7 +184,7 @@ option_parser = OptionParser.new do |o|
   o.on '-s', '--since TIME', String, "an argument to git's --since argument (e.g. '1 week ago')" do |value|
     options[:since] = value
   end
-  o.on '-t', '--type TYPE', String, "Either 'contributors' or 'repos'" do |value|
+  o.on '-t', '--type TYPE', String, "Either 'contributors', 'repos', or 'files'" do |value|
     options[:type] = value
   end
   o.on '-h', '--help' do
@@ -165,7 +207,9 @@ when 'contributors'
   puts contributors.contributor_weighted_graph.to_json
 when 'repos'
   puts contributors.repo_weighted_graph.to_json
+when 'files'
+  puts contributors.file_weighted_graph.to_json
 else
-  raise "Unknown calculation type: #{options[:type]}. Valid options are 'contributors' and 'repos'"
+  raise "Unknown calculation type: #{options[:type]}. Valid options are 'contributors' and 'files'"
 end
 

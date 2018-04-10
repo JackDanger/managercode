@@ -16,10 +16,10 @@ function main() {
     exit 1
   fi
 
-  local parameterized_name=$(parameterize "${name}")
+  local parameterized_name=$(echo ${name} | tr -cd '[[:alpha:]] ' | tr ' ' '-')
 
   local tmpdir=${parameterized_name}.gen
-  mkdir $tmpdir
+  mkdir -p $tmpdir
   cp ${filename} ${tmpdir}/graphData.json
   cp index.html.template ${tmpdir}/index.html
   cp force-graph.js ${tmpdir}/
@@ -32,11 +32,5 @@ function main() {
   open http://localhost:5050/index.html
   popd
 }
-
-parameterize() {
-  set -x
-  echo $@ | tr -cd '[[:alpha:]] ' | tr ' ' '-'
-}
-export -f parameterize
 
 main "${@}"

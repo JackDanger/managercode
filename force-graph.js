@@ -46,7 +46,7 @@ function drawForceGraph(svg, graph) {
     .data(graph.nodes)
     .enter()
       .append("circle")
-      .attr("r", function(d) { return 4 + Math.sqrt(d.count) })
+      .attr("r", function(d) { return 4 + Math.log10(d.count) })
       .attr("fill", function(d) { return color(d.group); })
       .call(d3.drag()
           .on("start", dragstarted)
