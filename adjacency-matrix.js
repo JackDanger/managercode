@@ -9,8 +9,24 @@ var adjacency = adjacency_svg
 		.attr("width", width)
 		.attr("height", height)
 
+// optionally trim the edges to include only edges of a minimum_weight:
+// http://this.page/?trim_below=3
+var trim_below = window.location.search.match(/trim_below=(\d+)/)[1]
+
 d3.json('graphData.json', function(data) {
   data.nodes.sort(function(a, b) { return b.weight < a.weight } )
+
+  if (trim_below) {
+    var truncated_links = []
+    for (var i in graph.links) {
+      var link = graph.links[i]
+      if (link.value > 1) {
+        truncated_links.push(link)
+      }
+    }
+    graph.links = truncated_links;
+  }
+
   const adjacencyMatrix = d3AdjacencyMatrixLayout();
 
   adjacencyMatrix

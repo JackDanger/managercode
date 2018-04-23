@@ -4,3 +4,4 @@ graphData.json
 contributorGraphData.json
 repoGraphData.json
 eng.emails
+*.gen
