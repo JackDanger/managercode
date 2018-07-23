@@ -5,17 +5,17 @@
 
 set -euo pipefail
 
-set -x
 function main() {
-  set -x
   echo ${*}
   local name=$1
   local filename=$2
+  local s3=$3
   if [[ -z $name ]] || [[ -z "${filename}" ]]; then
-    1>&2 echo "USAGE: ${0} name-of-graph /path/to/graphData.json"
+    1>&2 echo "USAGE: ${0} name-of-graph /path/to/graphData.json [S3_PATH]"
     exit 1
   fi
 
+  set -x
   local parameterized_name=$(echo ${name} | tr -cd '[[:alpha:]]- ' | tr ' ' '-')
 
   local deploy_dir=${parameterized_name}.gen
@@ -27,6 +27,26 @@ function main() {
   cp force-graph.js ${deploy_dir}/
   cp adjacency-matrix.js ${deploy_dir}/
   cp d3*.js ${deploy_dir}/
+
+  if [[ "${s3}" == "--s3" ]]; then
+    deploy_to_s3 "${parameterized_name}" "${filename}"
+  else
+    render_and_serve "${parameterized_name}" "${filename}"
+  fi
+}
+
+deploy_to_s3() {
+  set -x
+  local parameterized_name=$1
+  local filename=$2
+  aws s3 cp --recursive ${parameterized_name}.gen s3://jackdanger.com/managercode/${parameterized_name}
+  sleep 1
+  open https://jackdanger.com/managercode/${parameterized_name}/index.html
+}
+
+render_and_serve() {
+  local parameterized_name=$1
+  local filename=$2
 
   # Start the server
   if nc -z localhost 5050; then

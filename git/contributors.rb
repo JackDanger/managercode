@@ -1,4 +1,3 @@
-require 'slop'
 require 'json'
 require 'pry'
 

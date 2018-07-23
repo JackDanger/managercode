@@ -9,7 +9,10 @@ var	force_graph_svg = d3.select("body")
 
 // optionally trim the edges to include only edges of a minimum_weight:
 // http://this.page/?trim_below=3
-var trim_below = window.location.search.match(/trim_below=(\d+)/)[1]
+var trim_below = window.location.search.match(/trim_below=(\d+)/);
+if (trim_below) {
+  trim_below = trim_below[1]
+}
 
 
 d3.json("graphData.json", function(error, graph) {
@@ -45,15 +48,6 @@ function drawForceGraph(svg, graph) {
       .append("g")
         .attr("width", width)
         .attr("height", height)
-
-  force_graph.append("rect")
-      .attr("fill", "none")
-      .attr("pointer-events", "all")
-      .attr("width", width)
-      .attr("height", height)
-      .call(d3.zoom()
-          .scaleExtent([-100, 100])
-          .on("zoom", function() { force_graph.attr("transform", d3.event.transform) }));
 
   var color = d3.scaleOrdinal(d3.schemeCategory20);
 
@@ -144,5 +138,14 @@ function drawForceGraph(svg, graph) {
     d.fx = null;
     d.fy = null;
   }
+  force_graph.append("rect")
+      .attr("fill", "none")
+      .attr("pointer-events", "all")
+      .attr("width", width)
+      .attr("height", height)
+      .call(d3.zoom()
+          .scaleExtent([-500, 500])
+          .on("zoom", function() { force_graph.attr("transform", d3.event.transform) }));
+
 }
 })()
