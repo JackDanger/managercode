@@ -2,64 +2,142 @@ require 'slack-ruby-client'
 require 'fileutils'
 
 Slack.configure do |config|
-  config.token = ENV['SLACK_API_TOKEN']
+  config.token = ENV.fetch('SLACK_API_TOKEN')
 end
 
-client = Slack::Web::Client.new
-channels = client.channels_list.channels.reject {|c| c['is_archived'] }
+class SlackCache
 
-CACHE_DIR = ARGV[0] || '/tmp/slack-cache'
-puts "Caching messages in #{CACHE_DIR}"
-OLDEST = Time.parse('2018-01-01 00:00:00 -0700')
-START_TIME = Time.now
+  DIR = ARGV[0] || './slack-cache'
 
-def cache_file(channel)
-  File.join(CACHE_DIR, channel['id'])
-end
+  Epoch = Time.new(1970, 1, 1)
 
-def stored?(channel)
-  File.exist?(cache_file(channel))
-end
+  def update
+    puts "Caching messages in #{DIR}"
+    @start_time = Time.now
+    channels.each do |channel|
+      update_channel(channel)
+    end
+  end
 
-def store!(channel, data)
-  puts "Storing <##{channel['id']}|#{channel['name_normalized']}>: #{data.size}"
-  FileUtils.mkdir_p(CACHE_DIR)
-  File.open(cache_file(channel), 'w') do |f|
-    f.write data
+  def update_channel(channel)
+    retrieve_stored(channel)
+      puts "already stored #{channel['name']}"
+      return
+    end
+    store!(channel, formatted_messages(channel).to_json)
+  end
+
+  def formatted_messages(channel)
+    Enumerator.new do
+      messages(channel['id']).each do |m| 
+        message = m.slice('user', 'text', 'ts', 'parent_user_id', 'client_msg_id', 'reactions')
+        if m['replies']
+          replies = replies(channel['id'], m['ts'])
+          message = { thread: replies['messages'] }
+          message[:thread].each do |mm|
+            mm['_username'] = user_map[mm['user']]
+            mm['_parent_username'] = user_map[mm['parent_user_id']]
+            mm['_ts'] = Epoch + mm['ts'].to_f
+          end
+        else
+          message['_username'] = user_map[message['user']]
+          message['_parent_username'] = user_map[message['parent_user_id']]
+          message['_ts'] = Epoch + message['ts'].to_f
+        end
+        yield message
+      end
+    end
+  end
+
+  def messages(channel_id)
+    Enumerator.new do
+      oldest = parse_oldest
+      response = { 'has_more' => true }
+      while response['has_more']
+        begin
+        response = client.channels_history(channel: channel_id, oldest: oldest, limit: 1000)
+        break if response['messages'].empty?
+
+        oldest = response['messages'].first['ts']
+        response['messages'].each { |m| yield m }
+        sleep_factor = 1
+        rescue Slack::Web::Api::Errors::TooManyRequestsError
+          sleep_amount = 10 + (2 ** sleep_factor)
+          puts "Sleeping for #{sleep_amount}"
+          sleep sleep_amount
+          sleep_factor += 1
+          next
+        end
+      end
+    end
+  end
+
+  def replies(channel_id, thread_ts)
+    response = client.channels_replies(channel: channel['id'], thread_ts: m['ts'])
+    response['messages']
+  rescue Slack::Web::Api::Errors::TooManyRequestsError
+    sleep 20
+    retry
+  end
+
+  def user_map
+    @user_map ||= client.users_list['members'].reduce({}) do |acc, user|
+      acc.update user['id'] => user['name']
+    end
+  end
+
+  def stored?(channel)
+    File.exist?(cache_file(channel))
+  end
+
+  def channels
+    @channels ||= client.channels_list.channels.reject {|c| c['is_archived'] }
+  end
+
+  def store!(channel, data)
+    puts "Storing <##{channel['id']}|#{channel['name_normalized']}>: #{data.size}"
+    FileUtils.mkdir_p(DIR)
+    File.open(cache_file(channel), 'w') do |f|
+      f.write data
+    end
+  end
+
+  def cache_file(channel)
+    File.join(DIR, channel['id'])
+  end
+
+  def parse_oldest
+    @parse_oldest ||= Time.parse(ARGV[1])
+  rescue
+    @parse_oldest ||= Time.parse('2019-01-19 00:00:00 -0700')
+  end
+
+  def client
+    @client ||= Slack::Web::Client.new
+  end
+
+  class Channel
+    attr_reader :id, :slack_cache
+
+    def initialize(id, slack_cache)
+      @id = id
+      @slack_cache = slack_cache
+    end
+  end
+
+  class Message
+    attr_reader :id, :channel
+
+    def initialize(id, channel)
+      @id = id
+      @channel = channel
+    end
   end
 end
 
-sleep_factor = 1
-
-channels.each do |channel|
-  next if stored?(channel)
-  messages = []
-  response = { 'has_more' => true }
-  oldest = OLDEST.to_i
-
-  while response['has_more']
-    begin
-    response = client.channels_history(channel: channel['id'], oldest: oldest, limit: 1000)
-    next if response['messages'].empty?
-    sleep_factor = 1
-    rescue Slack::Web::Api::Errors::TooManyRequestsError
-      sleep_amount = 5 + (2 ** sleep_factor)
-      puts "Sleeping for #{sleep_amount}"
-      sleep sleep_amount
-      sleep_factor += 1
-      next
-    end
-    oldest = response['messages'].first['ts']
-    response['messages'].each do |m| 
-      messages << m.slice('user', 'text', 'parent_user_id', 'client_msg_id', 'replies', 'reactions')
-    end
-  end
-  store!(channel, messages.to_json)
-end
+SlackCache.new.update
 
 require 'pry'
 binding.pry
 
 puts 'done'
-
-# Download the last 1 week of messages from all channels
