@@ -16,12 +16,14 @@ class SlackCache
     @start_time = Time.now
     channels.each do |channel|
       update_channel(channel)
+      break
     end
   end
 
   def update_channel(channel)
     cached_messages = retrieve_stored(channel)
 
+    puts "Updating <#{channel['id']}|#{channel['name_normalized']}>"
     messages = update_messages(channel, cached_messages)
 
     store!(channel, messages.to_a)
@@ -30,21 +32,19 @@ class SlackCache
   def update_messages(channel, cached_messages)
     Enumerator.new do |enumerator|
       messages(channel['id'], cached_messages).sort_by { |m| m['ts'] }.each do |m| 
-        #if m['replies'] && !m['_replies_expanded']
-        #  replies(channel['id'], m['ts']).each do |mm|
-        #    mm['_username'] = user_map[mm['user']]
-        #    mm['_parent_username'] = user_map[mm['parent_user_id']]
-        #    mm['_ts'] = Epoch + mm['ts'].to_f
-        #    mm['_replies_expanded'] = true
-        #    enumerator.yield mm
-        #  end
-        #els
+        if m['replies'] && !m['_replies_expanded']
+          m['_replies_expanded'] = replies(channel['id'], m['ts']).map do |thread_m|
+            thread_m['_username'] = user_map[thread_m['user']]
+            thread_m['_parent_username'] = user_map[thread_m['parent_user_id']]
+            thread_m['_ts'] = Epoch + thread_m['ts'].to_f
+          end
+        end
         if m['_ts'].nil?
           m['_username'] = user_map[m['user']]
           m['_parent_username'] = user_map[m['parent_user_id']]
           m['_ts'] = Epoch + m['ts'].to_f
-          enumerator.yield m
         end
+        enumerator.yield m
       end
     end
   end
@@ -63,9 +63,11 @@ class SlackCache
         begin
 
           puts "making a remote call for #{channel_id}, oldest: #{oldest} - #{Epoch + oldest.to_f} (oldest.object_id: #{oldest.object_id})"
-          response = client.channels_history(channel: channel_id, oldest: oldest.to_f, limit: 1000)
+          response = client.channels_history(channel: channel_id, oldest: oldest.to_f, limit: 1000, inclusive: true)
           puts "got #{response['messages'].size} remote messages"
           puts "have #{cached_messages.size} cached messages"
+          require 'pry'
+          binding.pry
 
           # When there's no remote data, just replay the cache and exit
           while response['messages'].empty? && cached_messages.any?
@@ -74,28 +76,24 @@ class SlackCache
             break
           end
 
-          oldest = response['messages'].last['ts'] if response['messages'].any?
+          oldest = response['messages'].first['ts'] if response['messages'].any?
           seen = Epoch.to_f
 
           response['messages'].reverse.each do |message|
             while cached_messages.any? && message['ts'] >= cached_messages.first['ts']
               # We've reached the start of the cached messages so let's process them
               cached_message = cached_messages.shift
-              puts("- #{cached_message['ts']}") && STDOUT.flush
+              print("-") && STDOUT.flush
               enumerator.yield cached_message
               seen = cached_message['ts'].to_f
               oldest = cached_message['ts'] if oldest < cached_message['ts']
             end
 
             if seen < message['ts'].to_f
-              puts("+ #{message['ts']}") && STDOUT.flush
+              print("+") && STDOUT.flush
               oldest = message['ts'] if oldest < message['ts']
               enumerator.yield message
               seen = message['ts'].to_f
-            else
-              require 'pry'
-              binding.pry
-
             end
           end
           puts ''
@@ -112,8 +110,8 @@ class SlackCache
   end
 
   def replies(channel_id, thread_ts)
-    puts ''
-    puts "making remote call for thread: #{channel_id}/#{thread_ts}"
+    print('T') && STDOUT.flush
+    # puts "making remote call for thread: #{channel_id}/#{thread_ts}"
     response = client.channels_replies(channel: channel_id, thread_ts: thread_ts)
     response['messages']
   rescue Slack::Web::Api::Errors::TooManyRequestsError
@@ -136,6 +134,7 @@ class SlackCache
   end
 
   def store!(channel, data)
+    puts ''
     puts "Storing <##{channel['id']}|#{channel['name_normalized']}>: #{data.size}"
     FileUtils.mkdir_p(DIR)
     File.open(cache_file(channel), 'w') do |f|
