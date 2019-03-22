@@ -16,7 +16,6 @@ class SlackCache
     @start_time = Time.now
     channels.each do |channel|
       update_channel(channel)
-      break
     end
   end
 
@@ -62,12 +61,10 @@ class SlackCache
       while response['has_more']
         begin
 
-          puts "making a remote call for #{channel_id}, oldest: #{oldest} - #{Epoch + oldest.to_f} (oldest.object_id: #{oldest.object_id})"
-          response = client.channels_history(channel: channel_id, oldest: oldest.to_f, limit: 1000, inclusive: true)
-          puts "got #{response['messages'].size} remote messages"
-          puts "have #{cached_messages.size} cached messages"
-          require 'pry'
-          binding.pry
+          # puts "making a remote call for #{channel_id}, oldest: #{oldest} - #{Epoch + oldest.to_f} (oldest.object_id: #{oldest.object_id})"
+          response = client.channels_history(channel: channel_id, oldest: oldest.to_f, limit: 1000)
+          # puts "got #{response['messages'].size} remote messages"
+          # puts "have #{cached_messages.size} cached messages"
 
           # When there's no remote data, just replay the cache and exit
           while response['messages'].empty? && cached_messages.any?
@@ -80,13 +77,15 @@ class SlackCache
           seen = Epoch.to_f
 
           response['messages'].reverse.each do |message|
-            while cached_messages.any? && message['ts'] >= cached_messages.first['ts']
-              # We've reached the start of the cached messages so let's process them
-              cached_message = cached_messages.shift
-              print("-") && STDOUT.flush
-              enumerator.yield cached_message
-              seen = cached_message['ts'].to_f
-              oldest = cached_message['ts'] if oldest < cached_message['ts']
+            if cached_messages.any? && message['ts'] >= cached_messages.first['ts']
+              while cached_messages.any?
+                # We've reached the start of the cached messages so let's process them
+                cached_message = cached_messages.shift
+                print("-") && STDOUT.flush
+                enumerator.yield cached_message
+                seen = cached_message['ts'].to_f
+                oldest = cached_message['ts'] if oldest < cached_message['ts']
+              end
             end
 
             if seen < message['ts'].to_f
@@ -96,6 +95,8 @@ class SlackCache
               seen = message['ts'].to_f
             end
           end
+          # Bump the timestamp just enough to skip the last message
+          oldest = oldest.to_f + 0.000001
           puts ''
           sleep_factor = 1
         rescue Slack::Web::Api::Errors::TooManyRequestsError
