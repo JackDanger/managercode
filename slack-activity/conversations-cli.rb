@@ -20,47 +20,74 @@ class SlackCache
   end
 
   def update_channel(channel)
-    retrieve_stored(channel)
-      puts "already stored #{channel['name']}"
-      return
-    end
-    store!(channel, formatted_messages(channel).to_json)
+    cached_messages = retrieve_stored(channel)
+
+    messages = update_messages(channel, cached_messages)
+
+    store!(channel, messages.to_a)
   end
 
-  def formatted_messages(channel)
-    Enumerator.new do
-      messages(channel['id']).each do |m| 
-        message = m.slice('user', 'text', 'ts', 'parent_user_id', 'client_msg_id', 'reactions')
-        if m['replies']
-          replies = replies(channel['id'], m['ts'])
-          message = { thread: replies['messages'] }
-          message[:thread].each do |mm|
+  def update_messages(channel, cached_messages)
+    Enumerator.new do |enumerator|
+      messages(channel['id'], cached_messages).each do |m| 
+        if m['replies'] && ! m['_replies_expanded']
+          replies(channel['id'], m['ts']).each do |mm|
             mm['_username'] = user_map[mm['user']]
             mm['_parent_username'] = user_map[mm['parent_user_id']]
             mm['_ts'] = Epoch + mm['ts'].to_f
+            mm['_replies_expanded'] = true
+            enumerator.yield mm
           end
-        else
-          message['_username'] = user_map[message['user']]
-          message['_parent_username'] = user_map[message['parent_user_id']]
-          message['_ts'] = Epoch + message['ts'].to_f
+        elsif m['_ts'].nil?
+          m['_username'] = user_map[m['user']]
+          m['_parent_username'] = user_map[m['parent_user_id']]
+          m['_ts'] = Epoch + m['ts'].to_f
+          enumerator.yield m
         end
-        yield message
       end
     end
   end
 
-  def messages(channel_id)
-    Enumerator.new do
-      oldest = parse_oldest
+  def messages(channel_id, cached_messages)
+    # Unique the messages by timestamp
+    cached_messages = cached_messages.each_with_object({}) {|m, acc| acc[m['ts']] = m }
+    # and return the datastructure to it's original form, sorted by timestamp
+    cached_messages = cached_messages.sort_by(&:first).map(&:last)
+
+    Enumerator.new do |enumerator|
+      sleep_factor = 1
+      oldest = parse_oldest.to_f
       response = { 'has_more' => true }
       while response['has_more']
         begin
-        response = client.channels_history(channel: channel_id, oldest: oldest, limit: 1000)
-        break if response['messages'].empty?
 
-        oldest = response['messages'].first['ts']
-        response['messages'].each { |m| yield m }
-        sleep_factor = 1
+          response = client.channels_history(channel: channel_id, oldest: oldest.to_f, limit: 1000)
+
+          # When there's no remote data, just replay the cache and exit
+          while response['messages'].empty? && cached_messages.any?
+            enumerator.yield cached_messages.shift
+            break
+          end
+
+          oldest = response['messages'].first['ts'] if response['messages'].any?
+
+          response['messages'].each do |message|
+            skip_this_message = false
+            while cached_messages.any? && message['ts'] >= cached_messages.first['ts']
+              # We've reached the start of the cached messages so let's process them
+              cached_message = cached_messages.shift
+              print('-') && STDOUT.flush
+              skip_this_message = true if cached_message['ts'] == message['ts']
+              enumerator.yield cached_message
+            end
+
+            if !skip_this_message
+              print('+') && STDOUT.flush
+              enumerator.yield message
+            end
+          end
+          puts ''
+          sleep_factor = 1
         rescue Slack::Web::Api::Errors::TooManyRequestsError
           sleep_amount = 10 + (2 ** sleep_factor)
           puts "Sleeping for #{sleep_amount}"
@@ -73,7 +100,9 @@ class SlackCache
   end
 
   def replies(channel_id, thread_ts)
-    response = client.channels_replies(channel: channel['id'], thread_ts: m['ts'])
+    puts ''
+    puts "making remote call for thread: #{channel_id}/#{thread_ts}"
+    response = client.channels_replies(channel: channel_id, thread_ts: thread_ts)
     response['messages']
   rescue Slack::Web::Api::Errors::TooManyRequestsError
     sleep 20
@@ -98,8 +127,14 @@ class SlackCache
     puts "Storing <##{channel['id']}|#{channel['name_normalized']}>: #{data.size}"
     FileUtils.mkdir_p(DIR)
     File.open(cache_file(channel), 'w') do |f|
-      f.write data
+      f.write data.to_json
     end
+  end
+
+  def retrieve_stored(channel)
+    JSON.parse(File.read(cache_file(channel)))
+  rescue JSON::ParserError, Errno::ENOENT
+    []
   end
 
   def cache_file(channel)
