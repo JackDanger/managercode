@@ -29,16 +29,17 @@ class SlackCache
 
   def update_messages(channel, cached_messages)
     Enumerator.new do |enumerator|
-      messages(channel['id'], cached_messages).each do |m| 
-        if m['replies'] && ! m['_replies_expanded']
-          replies(channel['id'], m['ts']).each do |mm|
-            mm['_username'] = user_map[mm['user']]
-            mm['_parent_username'] = user_map[mm['parent_user_id']]
-            mm['_ts'] = Epoch + mm['ts'].to_f
-            mm['_replies_expanded'] = true
-            enumerator.yield mm
-          end
-        elsif m['_ts'].nil?
+      messages(channel['id'], cached_messages).sort_by { |m| m['ts'] }.each do |m| 
+        #if m['replies'] && !m['_replies_expanded']
+        #  replies(channel['id'], m['ts']).each do |mm|
+        #    mm['_username'] = user_map[mm['user']]
+        #    mm['_parent_username'] = user_map[mm['parent_user_id']]
+        #    mm['_ts'] = Epoch + mm['ts'].to_f
+        #    mm['_replies_expanded'] = true
+        #    enumerator.yield mm
+        #  end
+        #els
+        if m['_ts'].nil?
           m['_username'] = user_map[m['user']]
           m['_parent_username'] = user_map[m['parent_user_id']]
           m['_ts'] = Epoch + m['ts'].to_f
@@ -56,34 +57,45 @@ class SlackCache
 
     Enumerator.new do |enumerator|
       sleep_factor = 1
-      oldest = parse_oldest.to_f
+      oldest = parse_oldest
       response = { 'has_more' => true }
       while response['has_more']
         begin
 
+          puts "making a remote call for #{channel_id}, oldest: #{oldest} - #{Epoch + oldest.to_f} (oldest.object_id: #{oldest.object_id})"
           response = client.channels_history(channel: channel_id, oldest: oldest.to_f, limit: 1000)
+          puts "got #{response['messages'].size} remote messages"
+          puts "have #{cached_messages.size} cached messages"
 
           # When there's no remote data, just replay the cache and exit
           while response['messages'].empty? && cached_messages.any?
+            print('-') && STDOUT.flush
             enumerator.yield cached_messages.shift
             break
           end
 
-          oldest = response['messages'].first['ts'] if response['messages'].any?
+          oldest = response['messages'].last['ts'] if response['messages'].any?
+          seen = Epoch.to_f
 
-          response['messages'].each do |message|
-            skip_this_message = false
+          response['messages'].reverse.each do |message|
             while cached_messages.any? && message['ts'] >= cached_messages.first['ts']
               # We've reached the start of the cached messages so let's process them
               cached_message = cached_messages.shift
-              print('-') && STDOUT.flush
-              skip_this_message = true if cached_message['ts'] == message['ts']
+              puts("- #{cached_message['ts']}") && STDOUT.flush
               enumerator.yield cached_message
+              seen = cached_message['ts'].to_f
+              oldest = cached_message['ts'] if oldest < cached_message['ts']
             end
 
-            if !skip_this_message
-              print('+') && STDOUT.flush
+            if seen < message['ts'].to_f
+              puts("+ #{message['ts']}") && STDOUT.flush
+              oldest = message['ts'] if oldest < message['ts']
               enumerator.yield message
+              seen = message['ts'].to_f
+            else
+              require 'pry'
+              binding.pry
+
             end
           end
           puts ''
@@ -142,9 +154,9 @@ class SlackCache
   end
 
   def parse_oldest
-    @parse_oldest ||= Time.parse(ARGV[1])
+    @parse_oldest ||= Time.parse(ARGV[1]).to_f.to_s
   rescue
-    @parse_oldest ||= Time.parse('2019-01-19 00:00:00 -0700')
+    @parse_oldest ||= Time.parse('2019-01-19 00:00:00 -0700').to_f.to_s
   end
 
   def client
