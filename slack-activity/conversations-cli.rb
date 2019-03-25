@@ -11,8 +11,9 @@ class SlackCache
 
   Epoch = Time.new(1970, 1, 1)
 
-  def initialize(oldest = nil)
+  def initialize(oldest = nil, latest = nil)
     @parse_oldest = oldest
+    @parse_latest = latest
   end
 
   def update
@@ -60,75 +61,65 @@ class SlackCache
     cached_messages = cached_messages.sort_by(&:first).map(&:last)
 
     Enumerator.new do |enumerator|
-      sleep_factor = 1
       oldest = parse_oldest
-      response = { 'has_more' => true }
+      api_options = { channel: channel_id, oldest: oldest.to_f }
+      api_options[:latest] = parse_latest.to_f if parse_latest
       seen = Set.new
-      while response['has_more']
-        begin
+      puts "Getting all #{channel_id} history from #{oldest.inspect} to #{parse_latest.inspect}"
+      client.conversations_history(api_options) do |response|
+        puts "got #{response['messages'].size} remote messages"
+        puts "starting #{Epoch + response['messages'].first['ts'].to_f}" if response['messages'].any?
+        puts "have #{cached_messages.size} cached messages"
 
-          # puts "making a remote call for #{channel_id}, oldest: #{oldest} - #{Epoch + oldest.to_f} (oldest.object_id: #{oldest.object_id})"
-          response = client.channels_history(channel: channel_id, oldest: oldest.to_f, limit: 1000)
-          # puts "got #{response['messages'].size} remote messages"
-          # puts "have #{cached_messages.size} cached messages"
+        # When there's no remote data, just replay the cache and exit
+        while response['messages'].empty? && cached_messages.any?
+          print('-') && STDOUT.flush
+          enumerator.yield cached_messages.shift
+          break
+        end
 
-          # When there's no remote data, just replay the cache and exit
-          while response['messages'].empty? && cached_messages.any?
-            print('-') && STDOUT.flush
-            enumerator.yield cached_messages.shift
-            break
+        oldest = response['messages'].first['ts'] if response['messages'].any?
+        last_seen = Epoch.to_f
+
+        response['messages'].reverse.each do |message|
+          while cached_messages.any? && message['ts'] >= cached_messages.first['ts']
+            # puts "a cached message is older than the (reversed) first messages timestamp"
+            # We've reached the start of the cached messages so let's process them
+            cached_message = cached_messages.shift
+            print("-") && STDOUT.flush
+            enumerator.yield cached_message
+            last_seen = cached_message['ts'].to_f
+            seen << cached_message['ts']
+            oldest = cached_message['ts'] if oldest < cached_message['ts']
           end
 
-          oldest = response['messages'].first['ts'] if response['messages'].any?
-          last_seen = Epoch.to_f
-
-          response['messages'].reverse.each do |message|
-            while cached_messages.any? && message['ts'] >= cached_messages.first['ts']
-              # puts "a cached message is older than the (reversed) first messages timestamp"
-              # We've reached the start of the cached messages so let's process them
-              cached_message = cached_messages.shift
-              print("-") && STDOUT.flush
-              enumerator.yield cached_message
-              last_seen = cached_message['ts'].to_f
-              seen << cached_message['ts']
-              oldest = cached_message['ts'] if oldest < cached_message['ts']
-            end
-
-            unless seen.include?(message['ts'])
-              enumerator.yield message
-              seen << message['ts']
-              last_seen = message['ts'].to_f
-            end
-
-            if last_seen < message['ts'].to_f
-              # puts "we've only seen messages younger than this message"
-              print("+") && STDOUT.flush
-              oldest = message['ts'] if oldest < message['ts']
-              enumerator.yield message
-              last_seen = message['ts'].to_f
-              seen << message['ts']
-            end
+          unless seen.include?(message['ts'])
+            enumerator.yield message
+            seen << message['ts']
+            last_seen = message['ts'].to_f
           end
 
-          # Yield any remaining cached messages
-          if !response['has_more'] && cached_messages.any?
-            puts "no more, yielding cached"
-            while cached_messages.any?
-              print('-') && STDOUT.flush
-              enumerator.yield cached_messages.shift
-            end
-            break
+          if last_seen < message['ts'].to_f
+            # puts "we've only seen messages younger than this message"
+            print("+") && STDOUT.flush
+            oldest = message['ts'] if oldest < message['ts']
+            enumerator.yield message
+            last_seen = message['ts'].to_f
+            seen << message['ts']
           end
-          # Bump the timestamp just enough to skip the last message
-          oldest = oldest.to_f + 0.000001
-          puts ''
-          sleep_factor = 1
-        rescue Slack::Web::Api::Errors::TooManyRequestsError
-          sleep_amount = 10 + (2 ** sleep_factor)
-          puts "Sleeping for #{sleep_amount}"
-          sleep sleep_amount
-          sleep_factor += 1
-          next
+        end
+
+        # Bump the timestamp just enough to skip the last message
+        oldest = oldest.to_f + 0.000001
+        puts ''
+      end
+
+      # Yield any remaining cached messages
+      if cached_messages.any?
+        puts "no more, yielding cached"
+        while cached_messages.any?
+          print('-') && STDOUT.flush
+          enumerator.yield cached_messages.shift
         end
       end
     end
@@ -183,14 +174,27 @@ class SlackCache
     @parse_oldest ||= Time.parse('2019-01-19 00:00:00 -0700').to_f.to_s
   end
 
+  def parse_latest
+    @parse_latest
+  end
+
   def client
     @client ||= Slack::Web::Client.new
   end
 end
 
-SlackCache.new.update
+require 'active_support/all'
 
-require 'pry'
-binding.pry
+8.times.to_a.reverse.each do |i|
+  start = i.years.ago.beginning_of_year
+  finish = start + 4.months
+  SlackCache.new(start, finish).update
+  start = finish
+  finish = start + 4.months
+  SlackCache.new(start, finish).update
+  start = finish
+  finish = start + 4.months
+  SlackCache.new(start, finish).update
+end
 
 puts 'done'

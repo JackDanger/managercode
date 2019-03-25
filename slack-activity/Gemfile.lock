@@ -44,6 +44,7 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
+  activesupport
   pry-byebug
   slack-ruby-client
 
