@@ -11,6 +11,10 @@ class SlackCache
 
   Epoch = Time.new(1970, 1, 1)
 
+  def initialize(oldest = nil)
+    @parse_oldest = oldest
+  end
+
   def update
     puts "Caching messages in #{DIR}"
     @start_time = Time.now
@@ -36,6 +40,7 @@ class SlackCache
             thread_m['_username'] = user_map[thread_m['user']]
             thread_m['_parent_username'] = user_map[thread_m['parent_user_id']]
             thread_m['_ts'] = Epoch + thread_m['ts'].to_f
+            thread_m
           end
         end
         if m['_ts'].nil?
@@ -58,6 +63,7 @@ class SlackCache
       sleep_factor = 1
       oldest = parse_oldest
       response = { 'has_more' => true }
+      seen = Set.new
       while response['has_more']
         begin
 
@@ -74,26 +80,44 @@ class SlackCache
           end
 
           oldest = response['messages'].first['ts'] if response['messages'].any?
-          seen = Epoch.to_f
+          last_seen = Epoch.to_f
 
           response['messages'].reverse.each do |message|
-            if cached_messages.any? && message['ts'] >= cached_messages.first['ts']
-              while cached_messages.any?
-                # We've reached the start of the cached messages so let's process them
-                cached_message = cached_messages.shift
-                print("-") && STDOUT.flush
-                enumerator.yield cached_message
-                seen = cached_message['ts'].to_f
-                oldest = cached_message['ts'] if oldest < cached_message['ts']
-              end
+            while cached_messages.any? && message['ts'] >= cached_messages.first['ts']
+              # puts "a cached message is older than the (reversed) first messages timestamp"
+              # We've reached the start of the cached messages so let's process them
+              cached_message = cached_messages.shift
+              print("-") && STDOUT.flush
+              enumerator.yield cached_message
+              last_seen = cached_message['ts'].to_f
+              seen << cached_message['ts']
+              oldest = cached_message['ts'] if oldest < cached_message['ts']
             end
 
-            if seen < message['ts'].to_f
+            unless seen.include?(message['ts'])
+              enumerator.yield message
+              seen << message['ts']
+              last_seen = message['ts'].to_f
+            end
+
+            if last_seen < message['ts'].to_f
+              # puts "we've only seen messages younger than this message"
               print("+") && STDOUT.flush
               oldest = message['ts'] if oldest < message['ts']
               enumerator.yield message
-              seen = message['ts'].to_f
+              last_seen = message['ts'].to_f
+              seen << message['ts']
             end
+          end
+
+          # Yield any remaining cached messages
+          if !response['has_more'] && cached_messages.any?
+            puts "no more, yielding cached"
+            while cached_messages.any?
+              print('-') && STDOUT.flush
+              enumerator.yield cached_messages.shift
+            end
+            break
           end
           # Bump the timestamp just enough to skip the last message
           oldest = oldest.to_f + 0.000001
@@ -131,7 +155,7 @@ class SlackCache
   end
 
   def channels
-    @channels ||= client.channels_list.channels.reject {|c| c['is_archived'] }
+    @channels ||= client.channels_list.channels
   end
 
   def store!(channel, data)
@@ -150,7 +174,7 @@ class SlackCache
   end
 
   def cache_file(channel)
-    File.join(DIR, channel['id'])
+    File.join(DIR, "#{channel['name_normalized']}-#{channel['id']}")
   end
 
   def parse_oldest
@@ -161,24 +185,6 @@ class SlackCache
 
   def client
     @client ||= Slack::Web::Client.new
-  end
-
-  class Channel
-    attr_reader :id, :slack_cache
-
-    def initialize(id, slack_cache)
-      @id = id
-      @slack_cache = slack_cache
-    end
-  end
-
-  class Message
-    attr_reader :id, :channel
-
-    def initialize(id, channel)
-      @id = id
-      @channel = channel
-    end
   end
 end
 
