@@ -1,125 +1,96 @@
 require 'slack-ruby-client'
+require 'yaml'
 require 'fileutils'
 
 Slack.configure do |config|
   config.token = ENV.fetch('SLACK_API_TOKEN')
 end
 
+Epoch = Time.new(1970, 1, 1, 0, 0, 1, 0)
+
+
 class SlackCache
 
-  DIR = ARGV[0] || './slack-cache'
+  attr_reader :manifest
 
-  Epoch = Time.new(1970, 1, 1)
+  SYNC_BATCH_SIZE = 1_000
+  SYNC_REST_DELAY_IN_SECONDS = 60 * 60 * 4 # 4 hours
 
-  def initialize(oldest = nil, latest = nil)
-    @parse_oldest = oldest
-    @parse_latest = latest
+  def initialize
+    @manifest = Manifest.new(self)
   end
 
   def update
-    puts "Caching messages in #{DIR}"
+    puts "Caching messages in #{dir}"
     @start_time = Time.now
     channels.each do |channel|
+      if manifest.recently_synced?(channel['id'])
+        puts "Skipping <#{channel['id']}|#{channel['name_normalized']} – synced #{manifest.last_synced(channel['id'])} seconds ago"
+        next
+      end
       update_channel(channel)
     end
+    puts "finished in #{Time.now - @start_time}"
+  end
+
+  def most_recent_ts_in(messages)
+    messages.max {|a, b| a['ts'] <=> b['ts'] }
   end
 
   def update_channel(channel)
-    cached_messages = retrieve_stored(channel)
-
     puts "Updating <#{channel['id']}|#{channel['name_normalized']}>"
-    messages = update_messages(channel, cached_messages)
 
-    store!(channel, messages.to_a)
-  end
-
-  def update_messages(channel, cached_messages)
-    Enumerator.new do |enumerator|
-      messages(channel['id'], cached_messages).sort_by { |m| m['ts'] }.each do |m| 
-        if m['replies'] && !m['_replies_expanded']
-          m['_replies_expanded'] = replies(channel['id'], m['ts']).map do |thread_m|
-            thread_m['_username'] = user_map[thread_m['user']]
-            thread_m['_parent_username'] = user_map[thread_m['parent_user_id']]
-            thread_m['_ts'] = Epoch + thread_m['ts'].to_f
-            thread_m
-          end
-        end
-        if m['_ts'].nil?
-          m['_username'] = user_map[m['user']]
-          m['_parent_username'] = user_map[m['parent_user_id']]
-          m['_ts'] = Epoch + m['ts'].to_f
-        end
-        enumerator.yield m
+    enqueued_to_store = []
+    messages(channel['id']).each do |message|
+      enqueued_to_store << format_message(message, channel['id'])
+      if enqueued_to_store.size > SYNC_BATCH_SIZE
+        store!(channel, enqueued_to_store)
+        enqueued_to_store.clear
       end
     end
+    store!(channel, enqueued_to_store) if enqueued_to_store.any?
   end
 
-  def messages(channel_id, cached_messages)
-    # Unique the messages by timestamp
-    cached_messages = cached_messages.each_with_object({}) {|m, acc| acc[m['ts']] = m }
-    # and return the datastructure to it's original form, sorted by timestamp
-    cached_messages = cached_messages.sort_by(&:first).map(&:last)
+  def format_message(m, channel_id)
+    if m['replies'] && !m['_replies_expanded']
+      m['_replies_expanded'] = replies(channel_id, m['ts']).map do |thread_m|
+        thread_m['_username'] = user_map[thread_m['user']]
+        thread_m['_parent_username'] = user_map[thread_m['parent_user_id']]
+        thread_m['_ts'] = Epoch + thread_m['ts'].to_f
+        thread_m
+      end
+    end
+    if m['reactions']
+      m['reactions'].each do |reaction|
+        reaction['users'] = reaction['users'].map {|uid| "<##{uid}|@#{user_map[uid]}>" }
+      end
+    end
+    if m['_ts']
+      timestamp = Time.parse(m['_ts'])
+    else
+      m['_username'] = user_map[m['user']]
+      m['_parent_username'] = user_map[m['parent_user_id']]
+      timestamp = Epoch + m['ts'].to_f
+      m['_ts'] = timestamp.to_s
+    end
+    m
+  end
+
+  def messages(channel_id)
+    # Start at either the beginning of the channel history or where we left off.
+    oldest = manifest.last_synced_ts(channel_id) || Epoch.to_f.to_s
 
     Enumerator.new do |enumerator|
-      oldest = parse_oldest
-      api_options = { channel: channel_id, oldest: oldest.to_f }
-      api_options[:latest] = parse_latest.to_f if parse_latest
-      seen = Set.new
-      puts "Getting all #{channel_id} history from #{oldest.inspect} to #{parse_latest.inspect}"
+      api_options = { channel: channel_id, oldest: oldest }
+      # puts "Getting all #{channel_id} history from #{oldest.inspect} to #{parse_latest.inspect}"
       client.conversations_history(api_options) do |response|
-        puts "got #{response['messages'].size} remote messages"
-        puts "starting #{Epoch + response['messages'].first['ts'].to_f}" if response['messages'].any?
-        puts "have #{cached_messages.size} cached messages"
-
-        # When there's no remote data, just replay the cache and exit
-        while response['messages'].empty? && cached_messages.any?
-          print('-') && STDOUT.flush
-          enumerator.yield cached_messages.shift
-          break
-        end
-
-        oldest = response['messages'].first['ts'] if response['messages'].any?
-        last_seen = Epoch.to_f
-
-        response['messages'].reverse.each do |message|
-          while cached_messages.any? && message['ts'] >= cached_messages.first['ts']
-            # puts "a cached message is older than the (reversed) first messages timestamp"
-            # We've reached the start of the cached messages so let's process them
-            cached_message = cached_messages.shift
-            print("-") && STDOUT.flush
-            enumerator.yield cached_message
-            last_seen = cached_message['ts'].to_f
-            seen << cached_message['ts']
-            oldest = cached_message['ts'] if oldest < cached_message['ts']
-          end
-
-          unless seen.include?(message['ts'])
-            enumerator.yield message
-            seen << message['ts']
-            last_seen = message['ts'].to_f
-          end
-
-          if last_seen < message['ts'].to_f
-            # puts "we've only seen messages younger than this message"
-            print("+") && STDOUT.flush
-            oldest = message['ts'] if oldest < message['ts']
-            enumerator.yield message
-            last_seen = message['ts'].to_f
-            seen << message['ts']
-          end
-        end
-
-        # Bump the timestamp just enough to skip the last message
-        oldest = oldest.to_f + 0.000001
-        puts ''
-      end
-
-      # Yield any remaining cached messages
-      if cached_messages.any?
-        puts "no more, yielding cached"
-        while cached_messages.any?
-          print('-') && STDOUT.flush
-          enumerator.yield cached_messages.shift
+        # Sort the messages by increasing values - oldest to newest, just as
+        # they're displayed in the UI
+        messages = response['messages'].sort_by {|m| m['ts'] }
+        manifest.no_results!(channel_id) if messages.empty?
+        messages.each do |message|
+          print("+") && STDOUT.flush
+          enumerator.yield message
         end
       end
     end
@@ -141,18 +112,24 @@ class SlackCache
     end
   end
 
-  def stored?(channel)
-    File.exist?(cache_file(channel))
-  end
-
   def channels
     @channels ||= client.channels_list.channels
   end
 
-  def store!(channel, data)
+  def dir
+    @dir ||= File.join(ARGV[0] || './slack-cache')
+  end
+
+  def store!(channel, messages)
+    FileUtils.mkdir_p(dir)
+
+    cached_messages = retrieve_stored(channel)
+    data = (cached_messages + messages).sort_by { |m| m['ts'] }
     puts ''
-    puts "Storing <##{channel['id']}|#{channel['name_normalized']}>: #{data.size}"
-    FileUtils.mkdir_p(DIR)
+    puts "Storing <##{channel['id']}|#{channel['name_normalized']}>: #{messages.size}/#{data.size}"
+
+    manifest.set_last_synced_ts!(channel['id'], data.last['ts'])
+
     File.open(cache_file(channel), 'w') do |f|
       f.write data.to_json
     end
@@ -165,36 +142,71 @@ class SlackCache
   end
 
   def cache_file(channel)
-    File.join(DIR, "#{channel['name_normalized']}-#{channel['id']}")
-  end
-
-  def parse_oldest
-    @parse_oldest ||= Time.parse(ARGV[1]).to_f.to_s
-  rescue
-    @parse_oldest ||= Time.parse('2019-01-19 00:00:00 -0700').to_f.to_s
-  end
-
-  def parse_latest
-    @parse_latest
+    File.join(dir, "#{channel['name_normalized']}-#{channel['id']}")
   end
 
   def client
     @client ||= Slack::Web::Client.new
   end
+
+  class Manifest
+    def initialize(slack_cache)
+      @slack_cache = slack_cache
+    end
+
+    def data
+      @data ||= read!
+    end
+
+    def recently_synced?(channel_id)
+      return unless last_synced(channel_id)
+      (Time.now.to_f - last_synced(channel_id).to_f) < SYNC_REST_DELAY_IN_SECONDS
+    end
+
+    def last_synced(channel_id)
+      data[channel_id] ||= {}
+      data[channel_id]['performed_at']
+    end
+
+    def no_results!(channel_id)
+      data[channel_id] ||= {}
+      data[channel_id]['performed_at'] = Time.now
+      write!
+    end
+
+    def set_last_synced_ts!(channel_id, ts)
+      data[channel_id] ||= {}
+      data[channel_id]['latest'] = ts
+      data[channel_id]['performed_at'] = Time.now
+      write!
+    end
+
+    def last_synced_ts(channel_id)
+      data[channel_id] ||= {}
+      data[channel_id]['latest']
+    end
+
+    private
+
+    def write!
+      open(filename, 'w') { |f| f.write data.to_yaml }
+    end
+
+    def read!
+      if File.exist?(filename)
+        YAML.load_file(filename)
+      else
+        {}
+      end
+    end
+
+    def filename
+      @filename ||= File.join(@slack_cache.dir, 'manifest.yml')
+    end
+  end
+
 end
 
-require 'active_support/all'
-
-8.times.to_a.reverse.each do |i|
-  start = i.years.ago.beginning_of_year
-  finish = start + 4.months
-  SlackCache.new(start, finish).update
-  start = finish
-  finish = start + 4.months
-  SlackCache.new(start, finish).update
-  start = finish
-  finish = start + 4.months
-  SlackCache.new(start, finish).update
-end
+SlackCache.new.update
 
 puts 'done'
