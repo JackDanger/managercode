@@ -10,11 +10,13 @@ clone_org() {
   if [[ -n $GITHUB_TOKEN ]]; then
     authorization="Authorization: token ${GITHUB_TOKEN}"
   fi
+  curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -H "${authorization}"
   local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -H "${authorization}" -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
   if [[ "${total_pages}" == "" ]];then
-    1>&2 echo "Authorization required"
-    1>&2 echo "set the GITHUB_TOKEN environment variable"
-    exit 1
+    total_pages=1;
+    #1>&2 echo "Authorization required"
+    #1>&2 echo "set the GITHUB_TOKEN environment variable"
+    #exit 1
   fi
 
   for page in $(seq $total_pages); do

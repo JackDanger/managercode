@@ -3,7 +3,7 @@
 # Accepts JSON graph data through a filename argument.
 # This data is placed in a new directory and the necessary html is copied in.
 
-set -euo pipefail
+set -eo pipefail
 
 function main() {
   echo ${*}

@@ -124,6 +124,7 @@ class Contributors
       basename = File.basename(dir)
       email = nil
       Dir.chdir(dir) do
+        warn dir
         if scope == 'files'
           cmd = "git log --name-only --format='BREAK: %ae' --since='#{since}'"
           %x|#{cmd}|.each_line do |line|
