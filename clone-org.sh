@@ -34,15 +34,17 @@ _clone_page() {
     jq '.[] | .full_name' |
     sed 's/"//g' |
     while read repo; do
-      if [[ -d /${repo} ]]; then
+      if [[ -d ${checkout_location}/${repo} ]]; then
         echo "Updating ${repo}"
         cd ${checkout_location}/${repo}/
         git pull --recurse-submodules
       else
         echo "Cloning ${repo}"
-        if [[ -z "${GITHUB_TOKEN}" ]]; then
+        if [[ -n "${GITHUB_TOKEN}" ]]; then
+          echo "token exists"
           git clone --recursive git@github.com:${repo}.git ${checkout_location}/${repo}
         else
+          echo "no token"
           git clone --recursive https://github.com/${repo}.git ${checkout_location}/${repo}
         fi
       fi
