@@ -27,7 +27,7 @@ svg {
 <script type="text/javascript">
   var	margin = { top: 30, right: 20, bottom: 30, left: 50 },
   width = window.visualViewport.width - (margin.left + margin.right),
-  height = width * 2;
+  height = window.visualViewport.height - (margin.top + margin.bottom);
 </script>
 <script src="force-graph.js" type="text/javascript"></script>
 <script src="adjacency-matrix.js" type="text/javascript"></script>

@@ -42,9 +42,9 @@ function main() {
 deploy_to_s3() {
   set -x
   local parameterized_name=$1
-  local path=$2
-  aws s3 cp --recursive ${parameterized_name}.gen ${path}
-  echo "open https://jackdanger.com/managercode/${parameterized_name}/index.html"
+  local s3_path=$2
+  aws s3 cp --recursive ${parameterized_name}.gen ${s3_path}
+  echo "open ${s3_path}/index.html"
 }
 
 render_and_serve() {
