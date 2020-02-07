@@ -28,8 +28,12 @@ function main() {
   cp adjacency-matrix.js ${deploy_dir}/
   cp d3*.js ${deploy_dir}/
 
-  if [[ "${s3}" == "--s3" ]]; then
-    deploy_to_s3 "${parameterized_name}" "${filename}"
+  if [[ -n "${s3}" ]]; then
+    if [[ "${s3}" == "--s3" ]]; then
+      deploy_to_s3 ${parameterized_name} "s3://jackdanger.com/managercode/${parameterized_name}" 
+    else
+      deploy_to_s3 ${parameterized_name} ${s3}
+    fi
   else
     render_and_serve "${parameterized_name}" "${filename}"
   fi
@@ -38,10 +42,9 @@ function main() {
 deploy_to_s3() {
   set -x
   local parameterized_name=$1
-  local filename=$2
-  aws s3 cp --recursive ${parameterized_name}.gen s3://jackdanger.com/managercode/${parameterized_name}
-  sleep 1
-  open https://jackdanger.com/managercode/${parameterized_name}/index.html
+  local path=$2
+  aws s3 cp --recursive ${parameterized_name}.gen ${path}
+  echo "open https://jackdanger.com/managercode/${parameterized_name}/index.html"
 }
 
 render_and_serve() {
@@ -57,6 +60,7 @@ render_and_serve() {
     sleep 2
   fi
   open http://localhost:5050/${deploy_dir}/index.html
+  wait
 }
 
 main "${@}"

@@ -1,7 +1,9 @@
+require 'csv'
 require 'json'
 require 'pry'
 
 IGNORE_EMAILS = ENV['IGNORE_EMAILS'].to_s.split(',')
+DUPLICATE_EMAILS_CSV_FILE = ENV['DUPLICATE_EMAILS_CSV_FILE']
 
 class Contributors
   attr_reader :dir_containing_repos, :since
@@ -10,6 +12,8 @@ class Contributors
     @since = since
 
     @contributors = {}
+
+    email_normalization_map # memoize this before `cd`ing
   end
 
   # Calculate the connections between repos by how many authors they share.
@@ -40,7 +44,7 @@ class Contributors
       # Do a quadratic calculation to find the matrix overlap of all
       # contributors to this project
       emails.keys.combination(2).each do |email_pair|
-        key = email_pair_normalized(*email_pair)
+        key = email_pair_sorted(*email_pair)
         connection_counts[key] += [
           @contributors[file][email_pair.first],
           @contributors[file][email_pair.last],
@@ -134,6 +138,7 @@ class Contributors
               # skip
             else
               next if IGNORE_EMAILS.include?(email)
+              email = email_normalized(email)
               full_path = File.join(basename, line.chomp)
               ## Uncomment to show verbose logging
               # warn "#{email} -> #{full_path}"
@@ -171,7 +176,23 @@ class Contributors
     @email_domains[domain]
   end
 
-  def email_pair_normalized(email1, email2)
+  def email_normalization_map
+    return @email_normalization_map if defined?(@email_normalization_map)
+    if DUPLICATE_EMAILS_CSV_FILE
+      @email_normalization_map ||=
+        CSV.read(File.expand_path(DUPLICATE_EMAILS_CSV_FILE)).reduce({}) do |acc, group|
+          acc.merge group.reduce({}) {|a, e| a.update e => group.first }
+        end
+    else
+      @email_normalization_map = {}
+    end
+  end
+
+  def email_normalized(email)
+    email_normalization_map[email] || email
+  end
+
+  def email_pair_sorted(email1, email2)
     if email1 < email2
       [email1, email2]
     else
