@@ -44,5 +44,3 @@ DEPENDENCIES
   github_api
   pry-byebug
 
-BUNDLED WITH
-   2.0.1
