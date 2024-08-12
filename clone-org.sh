@@ -3,54 +3,29 @@
 &>/dev/null which jq || brew install jq
 
 clone_org() {
+  set -x
   # Clones all public repos for a github organization
   # updates them if they are already cloned
   local organization=$1
   local checkout_location=$2
-  if [[ -n $GITHUB_TOKEN ]]; then
-    authorization="Authorization: token ${GITHUB_TOKEN}"
-  fi
-  curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -H "${authorization}"
-  local total_pages=$(curl -s "https://api.github.com/orgs/${organization}/repos?type=sources" -H "${authorization}" -I | egrep -o 'page=\d*>; rel="last"' | cut -d = -f 2 | cut -d '>' -f 1)
-  if [[ "${total_pages}" == "" ]];then
-    total_pages=1;
-    #1>&2 echo "Authorization required"
-    #1>&2 echo "set the GITHUB_TOKEN environment variable"
-    #exit 1
-  fi
 
-  for page in $(seq $total_pages); do
-    echo "Cloning page ${page}"
-    _clone_page "${organization}" "${checkout_location}" "${page}" "${authorization}"
+  # Create the directory if it doesn't exist
+  mkdir -p "$checkout_location"
+
+  # Change to the specified directory
+  cd "$checkout_location" || exit
+
+  # Fetch the list of repositories for the organization and clone each one
+  gh repo list "$organization" --limit 1000 --json name -q '.[].name' | while read -r repo; do
+    git_dir="${checkout_location}/${repo}"
+    if [[ -d $git_dir ]]; then
+      pushd $git_dir
+      git pull --recurse-submodules
+      popd
+    else
+      gh repo clone "$organization/$repo"
+    fi
   done
-}
-
-_clone_page() {
-  local organization=$1
-  local checkout_location=$2
-  local page=$3
-  local authorization=$4
-  curl -s "https://api.github.com/orgs/${organization}/repos?page=${page}&type=sources" -H "${authorization}" |
-    jq '.[] | .full_name' |
-    sed 's/"//g' |
-    while read repo; do
-      if [[ -d ${checkout_location}/${repo} ]]; then
-        echo "Updating ${repo}"
-        cd ${checkout_location}/${repo}/
-        git pull --recurse-submodules
-      else
-        echo "Cloning ${repo}"
-        if [[ -n "${GITHUB_TOKEN}" ]]; then
-          echo "token exists"
-          git clone --recursive git@github.com:${repo}.git ${checkout_location}/${repo}
-        else
-          echo "no token"
-          git clone --recursive https://github.com/${repo}.git ${checkout_location}/${repo}
-        fi
-      fi
-    done
-  # Wait until all background jobs finish
-  wait
 }
 
 recent_work() {
@@ -66,7 +41,7 @@ recent_work() {
 
 usage() {
   echo "Usage:"
-  echo "$0 SOME_GITHUB_ORG /repo/path"
+  echo "$0 SOME_GITHUB_organization /repo/path"
   echo "$0 'recent' /repo/path"
   exit 1
 }
