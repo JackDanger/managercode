@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 import argparse
+import http.server
 import re
 import os
+import shutil
+import socketserver
 import subprocess
 import sys
 import json
@@ -73,8 +76,8 @@ def build_connection_graph(user_files):
 def main():
     parser = argparse.ArgumentParser(description='Generate git contributor graph')
 
-    parser.add_argument('-d', '--directory', help='parent directory of all git repos')
-    parser.add_argument('-o', '--organization', required=True, help='GitHub organization name')
+    parser.add_argument('-d', '--directory', required=True, help='parent directory of all git repos')
+    parser.add_argument('-o', '--organization', help='GitHub organization name')
     parser.add_argument('-t', '--team', help='GitHub team name')
     parser.add_argument('-i', '--ignore', nargs='+', default=[], help='List of usernames to ignore (e.g. "-i ansible root")')
     parser.add_argument('-s', '--since', default='90 days ago', help='how far back to analyze')
@@ -88,7 +91,7 @@ def main():
     since_date = args.since
     since_slug = since_date.replace(' ', '-')
 
-    output_file = f'git.{since_slug}.graphData.json'
+    output_dir = f'git.{since_slug}'
 
     # Get GitHub team members
     if team is not None:
@@ -125,13 +128,26 @@ def main():
         'links': connection_graph,
     }
 
-    # Print JSON file
+    # Create a directory for the rendered graph
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Copy HTML into the rendered directory
+    shutil.copy('index.html', output_dir)
+
+    output_file = f"{output_dir}/graphData.json"
     with open(output_file, 'w') as f:
         json.dump(data, f, indent=2)
-    print(f"Wrote graph to {output_file}")
-    print("run with:")
-    print("")
-    print(f"  ./render.sh {since_slug} {output_file} [s3://bucket/path]")
+
+    # Start the web server
+    os.chdir(output_dir)
+    PORT = 5050
+
+    with socketserver.TCPServer(("", PORT), http.server.SimpleHTTPRequestHandler) as httpd:
+
+        print(f"Serving at port {PORT}")
+        subprocess.run(['open', f'http://localhost:{PORT}/'], capture_output=False, text=True, check=False)
+        httpd.serve_forever()
+
   
 if __name__ == "__main__":
     main()
