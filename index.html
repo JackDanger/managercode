@@ -52,9 +52,10 @@
         d3.json("graphData.json").then(data => {
             const simulation = d3.forceSimulation(data.nodes)
                 .force("link", d3.forceLink(data.links).id(d => d.id).distance(100))
-                .force("charge", d3.forceManyBody().strength(-20))
+                .force("charge", d3.forceManyBody().strength(-30))
                 .force("center", d3.forceCenter(width / 2, height / 2))
-                .force("collision", d3.forceCollide().radius(d => Math.sqrt(d.count) + 5));
+                .force("collision", d3.forceCollide().radius(d => Math.sqrt(d.count) + 5))
+                .force("bounding", forceBoundingBox(width, height));
 
             const link = svg.append("g")
                 .attr("class", "links")
@@ -108,7 +109,7 @@
                     .attr("y2", d => d.target.y);
 
                 node
-                    .attr("transform", d => `translate(${d.x = Math.max(Math.sqrt(d.count), Math.min(width - Math.sqrt(d.count), d.x))}, ${d.y = Math.max(Math.sqrt(d.count), Math.min(height - Math.sqrt(d.count), d.y))})`);
+                    .attr("transform", d => `translate(${d.x}, ${d.y})`);
             });
 
             d3.select("#search").on("input", function() {
@@ -148,6 +149,25 @@
                         event.subject.fx = null;
                         event.subject.fy = null;
                     });
+            }
+
+            function forceBoundingBox(width, height) {
+                return function (alpha) {
+                    for (let i = 0; i < data.nodes.length; i++) {
+                        const node = data.nodes[i];
+
+                        // Adjust this multiplier to tune the gravity effect
+                        const gravityStrength = 0.005;
+
+                        node.vx += (width / 2 - node.x) * alpha * gravityStrength;
+                        node.vy += (height / 2 - node.y) * alpha * gravityStrength;
+
+                        if (node.x < 0) node.x = 0;
+                        if (node.x > width) node.x = width;
+                        if (node.y < 0) node.y = 0;
+                        if (node.y > height) node.y = height;
+                    }
+                };
             }
         });
     </script>
