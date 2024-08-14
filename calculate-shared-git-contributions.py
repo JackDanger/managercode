@@ -35,7 +35,6 @@ def get_github_team_members(org, team):
 def get_git_commit_counts(directory, user_commits, ignore, since):
 
     cmd = f"git -C {directory} log --format='%ae' --since '{since}' | sort | uniq -c"
-    print(cmd)
     counts = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
     for line in counts.stdout.split("\n"):
@@ -51,7 +50,6 @@ def get_git_files_changed(directory, user_names, ignore, since):
     user_files = defaultdict(set)
 
     git_log_cmd = ["git", "-C", directory, "log", "--name-only", "--format=BREAK: %cl %an", f"--since={since}"]
-    print(git_log_cmd)
     result = subprocess.run(git_log_cmd, capture_output=True, text=True, check=True)
     history = result.stdout.split('\n')
 
