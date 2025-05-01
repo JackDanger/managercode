@@ -489,86 +489,113 @@ def fetch_channel_history(session, base_url, token, db_conn, rate_limit, verbose
         raise
 
 
-def fetch_all_users(session, base_url, token, rate_limit, verbose):
+def fetch_all_users(session, base_url, token, rate_limit, verbose, db_conn):
     """Fetch all users from Slack, handling pagination."""
-    cur = session.cursor()
+    cur = db_conn.cursor()
     marker = None
     users_processed = 0
+    retry_count = 0
+    max_retries = 3
     
     while True:
-        # Prepare the request
-        url = f"{base_url}/cache/{token}/users/list"
-        params = {
-            "_x_app_name": "client",
-            "fp": "c7",
-            "_x_num_retries": "0"
-        }
-        
-        data = {
-            "token": token,
-            "present_first": True,
-            "enterprise_token": token
-        }
-        
-        if marker:
-            data["marker"] = marker
-        
-        headers = {
-            "accept": "*/*",
-            "accept-language": "en-US,en;q=0.9",
-            "cache-control": "no-cache",
-            "content-type": "text/plain;charset=UTF-8",
-            "origin": "https://app.slack.com",
-            "pragma": "no-cache",
-            "priority": "u=1, i",
-            "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"macOS"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-site"
-        }
-        
-        if verbose:
-            logging.debug(f"POST {url}  marker={marker}")
-        
-        r = session.post(url, params=params, headers=headers, json=data)
-        r.raise_for_status()
-        j = r.json()
-        
-        # Process users
-        users = j.get("users", [])
-        if verbose:
-            logging.debug(f"Got {len(users)} users")
-        
-        for user in users:
-            user_id = user.get("id")
-            if not user_id:
-                continue
+        try:
+            # Prepare the request
+            url = f"{base_url}/cache/{token}/users/list"
+            params = {
+                "_x_app_name": "client",
+                "fp": "c7",
+                "_x_num_retries": "0"
+            }
+            
+            data = {
+                "token": token,
+                "present_first": True,
+                "enterprise_token": token
+            }
+            
+            if marker:
+                data["marker"] = marker
+            
+            headers = {
+                "accept": "*/*",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "no-cache",
+                "content-type": "text/plain;charset=UTF-8",
+                "origin": "https://app.slack.com",
+                "pragma": "no-cache",
+                "priority": "u=1, i",
+                "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"macOS"',
+                "sec-fetch-dest": "empty",
+                "sec-fetch-mode": "cors",
+                "sec-fetch-site": "same-site"
+            }
+            
+            if verbose:
+                logging.debug(f"POST {url}  marker={marker}")
+            
+            r = session.post(url, params=params, headers=headers, json=data)
+            r.raise_for_status()
+            j = r.json()
+            
+            # Process users
+            users = j.get("users", [])
+            if verbose:
+                logging.debug(f"Got {len(users)} users")
+            
+            # Start transaction for bulk insert
+            db_conn.execute("BEGIN TRANSACTION")
+            
+            for user in users:
+                user_id = user.get("id")
+                if not user_id:
+                    continue
+                    
+                # Validate required fields
+                name = user.get("name", "").strip()
+                real_name = user.get("real_name", "").strip()
+                display_name = user.get("profile", {}).get("display_name", "").strip()
                 
-            # Store user data
-            cur.execute("""
-                INSERT OR REPLACE INTO users 
-                (id, name, real_name, display_name, raw_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, (
-                user_id,
-                user.get("name"),
-                user.get("real_name"),
-                user.get("profile", {}).get("display_name"),
-                json.dumps(user, separators=(",", ":"))
-            ))
+                if not any([name, real_name, display_name]):
+                    logging.warning(f"Skipping user {user_id} - no valid name found")
+                    continue
+                
+                # Store user data
+                cur.execute("""
+                    INSERT OR REPLACE INTO users 
+                    (id, name, real_name, display_name, raw_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    user_id,
+                    name,
+                    real_name,
+                    display_name,
+                    json.dumps(user, separators=(",", ":"))
+                ))
+                
+                users_processed += 1
             
-            users_processed += 1
-        
-        session.commit()
-        
-        # Check for more pages
-        marker = j.get("next_marker")
-        if not marker:
-            break
+            db_conn.commit()
+            retry_count = 0  # Reset retry count on success
             
-        time.sleep(rate_limit)
+            # Check for more pages
+            marker = j.get("next_marker")
+            if not marker:
+                break
+                
+            time.sleep(rate_limit)
+            
+        except (requests.RequestException, json.JSONDecodeError) as e:
+            retry_count += 1
+            if retry_count >= max_retries:
+                logging.error(f"Failed to fetch users after {max_retries} retries: {str(e)}")
+                db_conn.rollback()
+                raise
+            
+            logging.warning(f"Error fetching users (attempt {retry_count}/{max_retries}): {str(e)}")
+            db_conn.rollback()
+            time.sleep(rate_limit * 2)  # Exponential backoff
     
     if verbose:
         logging.info(f"Processed {users_processed} users")
@@ -578,6 +605,9 @@ def fetch_all_users(session, base_url, token, rate_limit, verbose):
 
 def get_user_display_name(db_conn, user_id):
     """Get the best available display name for a user."""
+    if not user_id:
+        return "Unknown"
+        
     cur = db_conn.cursor()
     cur.execute("""
         SELECT real_name, display_name, name
@@ -601,6 +631,8 @@ def export_for_axolotl(db_conn, output_dir):
     import json
     from datetime import datetime
     from collections import defaultdict
+    import tempfile
+    import shutil
     
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -612,165 +644,195 @@ def export_for_axolotl(db_conn, output_dir):
     channels = cur.fetchall()
     
     total_conversations = 0
+    max_conversation_size = 100  # Maximum messages per conversation
     
     # Create a dataset file for each channel
     for channel_id, channel_name in channels:
-        # Get all messages for this channel, including thread information
-        cur.execute("""
-            SELECT 
-                m.raw_json,
-                m.ts,
-                m.thread_ts,
-                CASE 
-                    WHEN m.thread_ts IS NULL THEN m.ts 
-                    ELSE m.thread_ts 
-                END as conversation_id
-            FROM messages m
-            WHERE m.channel_id = ?
-            ORDER BY conversation_id, m.ts ASC
-        """, (channel_id,))
-        
-        # Group messages by conversation (either thread or time-based)
-        conversations = defaultdict(list)
-        current_conversation = []
-        last_ts = None
-        last_conversation_id = None
-        
-        for raw_json, ts, thread_ts, conversation_id in cur.fetchall():
-            msg = json.loads(raw_json)
+        try:
+            # Get all messages for this channel, including thread information
+            cur.execute("""
+                SELECT 
+                    m.raw_json,
+                    m.ts,
+                    m.thread_ts,
+                    CASE 
+                        WHEN m.thread_ts IS NULL THEN m.ts 
+                        ELSE m.thread_ts 
+                    END as conversation_id
+                FROM messages m
+                WHERE m.channel_id = ?
+                ORDER BY conversation_id, m.ts ASC
+            """, (channel_id,))
             
-            # Skip messages without text
-            if not msg.get('text'):
-                continue
+            # Group messages by conversation (either thread or time-based)
+            conversations = defaultdict(list)
+            current_conversation = []
+            last_ts = None
+            last_conversation_id = None
             
-            # Get message timestamp
-            ts_float = float(ts)
-            
-            # Start a new conversation if:
-            # 1. This is the first message
-            # 2. There's a significant time gap (> 2 hours)
-            # 3. The conversation ID has changed
-            if (last_ts is None or 
-                ts_float - last_ts > 7200 or  # 2 hour gap
-                conversation_id != last_conversation_id):
+            for raw_json, ts, thread_ts, conversation_id in cur.fetchall():
+                try:
+                    msg = json.loads(raw_json)
+                except json.JSONDecodeError:
+                    logging.warning(f"Invalid JSON in message {ts} from channel {channel_id}")
+                    continue
                 
-                # Save previous conversation if it exists and has multiple messages
-                if len(current_conversation) > 1:
-                    conversations[last_conversation_id] = current_conversation
+                # Skip messages without text
+                if not msg.get('text'):
+                    continue
                 
-                # Start new conversation
-                current_conversation = []
-            
-            # Get user display name
-            user_id = msg.get('user')
-            user_name = get_user_display_name(db_conn, user_id) if user_id else "Slack"
-            
-            # Add message to current conversation
-            current_conversation.append({
-                "role": "user" if user_id else "assistant",
-                "content": msg['text'],
-                "ts": ts,
-                "thread_ts": thread_ts,
-                "user": user_name,
-                "reactions": msg.get('reactions', []),
-                "is_thread_parent": thread_ts is None and msg.get('thread_ts') is not None
-            })
-            
-            last_ts = ts_float
-            last_conversation_id = conversation_id
-        
-        # Add the last conversation if it has multiple messages
-        if len(current_conversation) > 1:
-            conversations[last_conversation_id] = current_conversation
-        
-        # Convert conversations to Axolotl format
-        axolotl_conversations = []
-        for conv_id, messages in conversations.items():
-            # Skip conversations with only one message
-            if len(messages) < 2:
-                continue
+                try:
+                    # Get message timestamp
+                    ts_float = float(ts)
+                except (ValueError, TypeError):
+                    logging.warning(f"Invalid timestamp {ts} in message from channel {channel_id}")
+                    continue
                 
-            # Format conversation for Axolotl
-            conversation = {
-                "messages": [
-                    {
-                        "role": msg["role"],
-                        "content": f"{msg['user']}: {msg['content']}"
+                # Start a new conversation if:
+                # 1. This is the first message
+                # 2. There's a significant time gap (> 2 hours)
+                # 3. The conversation ID has changed
+                # 4. Current conversation is too large
+                if (last_ts is None or 
+                    ts_float - last_ts > 7200 or  # 2 hour gap
+                    conversation_id != last_conversation_id or
+                    len(current_conversation) >= max_conversation_size):
+                    
+                    # Save previous conversation if it exists and has multiple messages
+                    if len(current_conversation) > 1:
+                        conversations[last_conversation_id] = current_conversation
+                    
+                    # Start new conversation
+                    current_conversation = []
+                
+                # Get user display name
+                user_id = msg.get('user')
+                user_name = get_user_display_name(db_conn, user_id) if user_id else "Slack"
+                
+                # Add message to current conversation
+                current_conversation.append({
+                    "role": "user" if user_id else "assistant",
+                    "content": msg['text'],
+                    "ts": ts,
+                    "thread_ts": thread_ts,
+                    "user": user_name,
+                    "reactions": msg.get('reactions', []),
+                    "is_thread_parent": thread_ts is None and msg.get('thread_ts') is not None
+                })
+                
+                last_ts = ts_float
+                last_conversation_id = conversation_id
+            
+            # Add the last conversation if it has multiple messages
+            if len(current_conversation) > 1:
+                conversations[last_conversation_id] = current_conversation
+            
+            # Convert conversations to Axolotl format
+            axolotl_conversations = []
+            for conv_id, messages in conversations.items():
+                # Skip conversations with only one message
+                if len(messages) < 2:
+                    continue
+                    
+                # Format conversation for Axolotl
+                conversation = {
+                    "messages": [
+                        {
+                            "role": msg["role"],
+                            "content": f"{msg['user']}: {msg['content']}"
+                        }
+                        for msg in messages
+                    ],
+                    "metadata": {
+                        "channel": channel_name,
+                        "channel_id": channel_id,
+                        "conversation_id": conv_id,
+                        "message_count": len(messages),
+                        "is_thread": messages[0]["thread_ts"] is not None,
+                        "participants": len(set(msg["user"] for msg in messages)),
+                        "has_reactions": any(msg["reactions"] for msg in messages)
                     }
-                    for msg in messages
-                ],
-                "metadata": {
-                    "channel": channel_name,
-                    "channel_id": channel_id,
-                    "conversation_id": conv_id,
-                    "message_count": len(messages),
-                    "is_thread": messages[0]["thread_ts"] is not None,
-                    "participants": len(set(msg["user"] for msg in messages)),
-                    "has_reactions": any(msg["reactions"] for msg in messages)
+                }
+                axolotl_conversations.append(conversation)
+            
+            # Skip channels with no conversations
+            if not axolotl_conversations:
+                continue
+            
+            # Create the dataset file
+            dataset = {
+                "type": "conversation",
+                "conversations": axolotl_conversations,
+                "channel": channel_name,
+                "channel_id": channel_id,
+                "stats": {
+                    "total_conversations": len(axolotl_conversations),
+                    "total_messages": sum(len(conv["messages"]) for conv in axolotl_conversations),
+                    "avg_messages_per_conversation": sum(len(conv["messages"]) for conv in axolotl_conversations) / len(axolotl_conversations),
+                    "thread_count": sum(1 for conv in axolotl_conversations if conv["metadata"]["is_thread"])
                 }
             }
-            axolotl_conversations.append(conversation)
-        
-        # Skip channels with no conversations
-        if not axolotl_conversations:
+            
+            # Write to temporary file first
+            safe_name = "".join(c if c.isalnum() else "_" for c in channel_name)
+            filename = f"{safe_name}_{channel_id}.json"
+            output_path = os.path.join(output_dir, filename)
+            
+            with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+                json.dump(dataset, temp_file, indent=2)
+                temp_path = temp_file.name
+            
+            # Atomic move to final location
+            shutil.move(temp_path, output_path)
+            
+            total_conversations += len(axolotl_conversations)
+            print(f"Exported {len(axolotl_conversations)} conversations from #{channel_name} to {output_path}")
+            print(f"  - Average messages per conversation: {dataset['stats']['avg_messages_per_conversation']:.1f}")
+            print(f"  - Thread conversations: {dataset['stats']['thread_count']}")
+            
+        except Exception as e:
+            logging.error(f"Error processing channel {channel_name}: {str(e)}")
             continue
-        
-        # Create the dataset file
-        dataset = {
-            "type": "conversation",
-            "conversations": axolotl_conversations,
-            "channel": channel_name,
-            "channel_id": channel_id,
-            "stats": {
-                "total_conversations": len(axolotl_conversations),
-                "total_messages": sum(len(conv["messages"]) for conv in axolotl_conversations),
-                "avg_messages_per_conversation": sum(len(conv["messages"]) for conv in axolotl_conversations) / len(axolotl_conversations),
-                "thread_count": sum(1 for conv in axolotl_conversations if conv["metadata"]["is_thread"])
-            }
+    
+    try:
+        # Create metadata file
+        metadata = {
+            "export_date": datetime.now().isoformat(),
+            "total_conversations": total_conversations,
+            "channels": len(channels),
+            "format": "axolotl-conversation",
+            "version": "1.0",
+            "channel_list": [name for _, name in channels]
         }
         
-        # Write to file
-        safe_name = "".join(c if c.isalnum() else "_" for c in channel_name)
-        filename = f"{safe_name}_{channel_id}.json"
-        output_path = os.path.join(output_dir, filename)
+        # Create dataset config file for Axolotl
+        dataset_config = {
+            "datasets": [
+                {
+                    "path": os.path.join(output_dir, f"{safe_name}_{channel_id}.json"),
+                    "type": "conversation"
+                }
+                for channel_id, channel_name in channels
+            ]
+        }
         
-        with open(output_path, 'w') as f:
-            json.dump(dataset, f, indent=2)
+        # Write metadata files atomically
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+            json.dump(metadata, temp_file, indent=2)
+            temp_path = temp_file.name
+        shutil.move(temp_path, os.path.join(output_dir, "metadata.json"))
         
-        total_conversations += len(axolotl_conversations)
-        print(f"Exported {len(axolotl_conversations)} conversations from #{channel_name} to {output_path}")
-        print(f"  - Average messages per conversation: {dataset['stats']['avg_messages_per_conversation']:.1f}")
-        print(f"  - Thread conversations: {dataset['stats']['thread_count']}")
-    
-    # Create a metadata file
-    metadata = {
-        "export_date": datetime.now().isoformat(),
-        "total_conversations": total_conversations,
-        "channels": len(channels),
-        "format": "axolotl-conversation",
-        "version": "1.0",
-        "channel_list": [name for _, name in channels]
-    }
-    
-    # Create a dataset config file for Axolotl
-    dataset_config = {
-        "datasets": [
-            {
-                "path": os.path.join(output_dir, f"{safe_name}_{channel_id}.json"),
-                "type": "conversation"
-            }
-            for channel_id, channel_name in channels
-        ]
-    }
-    
-    with open(os.path.join(output_dir, "metadata.json"), 'w') as f:
-        json.dump(metadata, f, indent=2)
-    
-    with open(os.path.join(output_dir, "axolotl_config.json"), 'w') as f:
-        json.dump(dataset_config, f, indent=2)
-    
-    print(f"\nExported {total_conversations} total conversations from {len(channels)} channels")
-    print(f"To train on all channels, use the generated axolotl_config.json")
+        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
+            json.dump(dataset_config, temp_file, indent=2)
+            temp_path = temp_file.name
+        shutil.move(temp_path, os.path.join(output_dir, "axolotl_config.json"))
+        
+        print(f"\nExported {total_conversations} total conversations from {len(channels)} channels")
+        print(f"To train on all channels, use the generated axolotl_config.json")
+        
+    except Exception as e:
+        logging.error(f"Error writing metadata files: {str(e)}")
+        raise
 
 
 def main():
@@ -838,7 +900,7 @@ def main():
     token = extract_token(session, base_url, args.verbose)
 
     # Fetch all users first
-    fetch_all_users(session, base_url, token, args.rate_limit, args.verbose)
+    fetch_all_users(session, base_url, token, args.rate_limit, args.verbose, conn)
 
     # Enumerate channels
     fetch_all_channels(
