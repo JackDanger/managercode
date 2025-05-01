@@ -43,8 +43,20 @@ def setup_db():
     cur.execute("""
       CREATE TABLE IF NOT EXISTS messages (
         channel_id TEXT,
-        ts         TEXT,
-        raw_json   TEXT,
+        ts TEXT,
+        thread_ts TEXT,
+        user_id TEXT,
+        subtype TEXT,
+        client_msg_id TEXT,
+        edited_ts TEXT,
+        edited_user TEXT,
+        reply_count INTEGER,
+        reply_users_count INTEGER,
+        latest_reply TEXT,
+        is_locked BOOLEAN,
+        has_files BOOLEAN,
+        has_blocks BOOLEAN,
+        raw_json TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (channel_id, ts)
@@ -418,9 +430,27 @@ def fetch_channel_history(session, base_url, token, db_conn, rate_limit, verbose
                     # Use INSERT OR REPLACE to update existing messages
                     cur2.execute("""
                         INSERT OR REPLACE INTO messages
-                        (channel_id, ts, raw_json, updated_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                    """, (ch_id, ts, raw))
+                        (channel_id, ts, thread_ts, user_id, subtype, client_msg_id,
+                         edited_ts, edited_user, reply_count, reply_users_count,
+                         latest_reply, is_locked, has_files, has_blocks, raw_json, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (
+                        ch_id,
+                        ts,
+                        m.get("thread_ts"),
+                        m.get("user"),
+                        m.get("subtype"),
+                        m.get("client_msg_id"),
+                        m.get("edited", {}).get("ts"),
+                        m.get("edited", {}).get("user"),
+                        m.get("reply_count"),
+                        m.get("reply_users_count"),
+                        m.get("latest_reply"),
+                        bool(m.get("is_locked")),
+                        bool(m.get("files")),
+                        bool(m.get("blocks")),
+                        raw
+                    ))
 
                     messages_processed += 1
 
