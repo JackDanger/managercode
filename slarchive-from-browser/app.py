@@ -672,7 +672,7 @@ class MessageManager:
         self._last_response = None
 
     def sync_all_channels(self) -> Tuple[int, int]:
-        """Sync messages from all channels."""
+        """Sync messages from all channels using a round-robin approach."""
         sync_cur = self.db.conn.cursor()  # For sync operations
         msg_cur = self.db.conn.cursor()   # For message operations
 
@@ -685,10 +685,9 @@ class MessageManager:
             # Get channels that need syncing
             sync_cur.execute(
                 """
-                SELECT c.id, c.name, s.last_sync_ts, s.last_sync_cursor
+                SELECT c.id, c.name, s.last_sync_ts, s.last_sync_cursor, s.is_fully_synced
                 FROM channels c
                 LEFT JOIN sync_state s ON c.id = s.channel_id
-                WHERE s.is_fully_synced = 0 OR s.is_fully_synced IS NULL
                 ORDER BY s.last_sync_ts ASC NULLS FIRST
             """
             )
@@ -700,19 +699,36 @@ class MessageManager:
 
             print(f"\nStarting sync of {total_channels} channels...")
 
-            for ch_id, ch_name, last_sync_ts, last_cursor in channels_to_sync:
-                if self.slack.config.verbose:
-                    logging.info(f"Fetching history for #{ch_name} ({ch_id})")
-                    if last_sync_ts:
-                        logging.info(f"  Resuming from {last_sync_ts}")
-                else:
-                    print(f"\nChannel {channels_processed + 1}/{total_channels}: #{ch_name}")
+            # Track sync state for each channel
+            channel_states = {
+                ch_id: {
+                    'name': ch_name,
+                    'cursor': last_cursor,
+                    'messages': 0,
+                    'pages': 0,
+                    'is_complete': False,
+                    'is_fully_synced': bool(is_fully_synced)
+                }
+                for ch_id, ch_name, _, last_cursor, is_fully_synced in channels_to_sync
+            }
 
-                cursor = last_cursor
-                channel_messages = 0
-                total_pages = 0
+            # Calculate max channel name length for padding
+            max_channel_length = max(len(state['name']) for state in channel_states.values())
 
-                while True:
+            while any(not state['is_complete'] for state in channel_states.values()):
+                for ch_id, state in channel_states.items():
+                    if state['is_complete']:
+                        continue
+
+                    ch_name = state['name']
+                    cursor = state['cursor']
+
+                    if self.slack.config.verbose:
+                        logging.info(f"Fetching history for #{ch_name} ({ch_id})")
+                        if cursor:
+                            logging.info(f"  Resuming from cursor {cursor}")
+
+                    # Fetch one page of messages
                     params = {
                         "token": self.slack.token,
                         "channel": ch_id,
@@ -751,17 +767,19 @@ class MessageManager:
                                 continue
 
                         if latest_ts is None or oldest_ts is None:
-                            logging.warning(f"No valid timestamps in page {total_pages} for channel {ch_name} ({ch_id})")
+                            logging.warning(f"No valid timestamps in page {state['pages']} for channel {ch_name} ({ch_id})")
                             continue
 
-                        total_pages += 1
+                        state['pages'] += 1
                         try:
                             latest_time = datetime.fromtimestamp(latest_ts).strftime("%Y-%m-%d %H:%M:%S")
                             oldest_time = datetime.fromtimestamp(oldest_ts).strftime("%Y-%m-%d %H:%M:%S")
-                            print(f"  Page {total_pages}: {len(msgs)} messages - {latest_time} to {oldest_time}")
+                            padded_name = f"#{ch_name}".ljust(max_channel_length + 1)  # +1 for the # symbol
+                            print(f"{padded_name}: {len(msgs)} messages - {latest_time} to {oldest_time}")
                         except (ValueError, OSError) as e:
                             logging.warning(f"Error formatting timestamp: {e}")
-                            print(f"  Page {total_pages}: {len(msgs)} messages")
+                            padded_name = f"#{ch_name}".ljust(max_channel_length + 1)
+                            print(f"{padded_name}: {len(msgs)} messages")
 
                     if self.slack.config.verbose:
                         logging.debug(f"  fetched {len(msgs)} msgs, next_cursor={cursor}")
@@ -808,7 +826,7 @@ class MessageManager:
                             )
 
                             messages_processed += 1
-                            channel_messages += 1
+                            state['messages'] += 1
                         except (ValueError, TypeError) as e:
                             logging.warning(f"Error processing message with ts={ts} in channel {ch_name} ({ch_id}): {e}")
                             continue
@@ -832,45 +850,48 @@ class MessageManager:
                         except Exception as e:
                             logging.warning(f"Error updating sync state for channel {ch_name} ({ch_id}): {e}")
 
-                    cursor = j.get("response_metadata", {}).get("next_cursor")
-                    if not cursor:
-                        # Mark channel as fully synced if we've reached the end
-                        sync_cur.execute(
-                            """
-                            UPDATE sync_state
-                            SET is_fully_synced = 1, updated_at = CURRENT_TIMESTAMP
-                            WHERE channel_id = ?
-                        """,
-                            (ch_id,),
-                        )
-                        self.db.conn.commit()
-                        break
+                    # Get next cursor and check if channel is complete
+                    next_cursor = j.get("response_metadata", {}).get("next_cursor")
+                    if not next_cursor:
+                        # Only mark as fully synced if we were going backwards (no cursor)
+                        if not cursor and not state['is_fully_synced']:
+                            sync_cur.execute(
+                                """
+                                UPDATE sync_state
+                                SET is_fully_synced = 1, updated_at = CURRENT_TIMESTAMP
+                                WHERE channel_id = ?
+                            """,
+                                (ch_id,),
+                            )
+                            self.db.conn.commit()
+                            state['is_fully_synced'] = True
+                            channels_processed += 1
+                            if not self.slack.config.verbose:
+                                print(f"  Completed backwards sync for #{ch_name}: {state['messages']} messages")
+                        else:
+                            # We've reached the end of forward sync, start backwards sync
+                            state['cursor'] = None
+                            continue
+
+                    state['cursor'] = next_cursor
+
+                    # Update sync run progress
+                    sync_cur.execute(
+                        """
+                        UPDATE sync_runs
+                        SET channels_processed = ?, messages_processed = ?
+                        WHERE id = ?
+                    """,
+                        (channels_processed, messages_processed, sync_run_id),
+                    )
+                    self.db.conn.commit()
 
                     if self.slack.config.verbose:
                         print(f"Sleeping for {self.slack.config.rate_limit} seconds")
                     time.sleep(self.slack.config.rate_limit)
 
-                channels_processed += 1
-                if not self.slack.config.verbose:
-                    print(f"  Total messages: {channel_messages}")
-
-                # Update sync run progress
-                sync_cur.execute(
-                    """
-                    UPDATE sync_runs
-                    SET channels_processed = ?, messages_processed = ?
-                    WHERE id = ?
-                """,
-                    (channels_processed, messages_processed, sync_run_id),
-                )
-                self.db.conn.commit()
-
-                if self.slack.config.verbose:
-                    print(f"Sleeping for {self.slack.config.rate_limit} seconds")
-                time.sleep(self.slack.config.rate_limit)
-
             # Mark sync run as complete
-            cur.execute(
+            sync_cur.execute(
                 """
                 UPDATE sync_runs
                 SET status = 'completed',
@@ -889,7 +910,7 @@ class MessageManager:
         except Exception as e:
             # Log error and mark sync run as failed
             logging.error(f"Sync failed: {str(e)}")
-            cur.execute(
+            sync_cur.execute(
                 """
                 UPDATE sync_runs
                 SET status = 'failed',
