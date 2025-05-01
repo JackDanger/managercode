@@ -320,6 +320,37 @@ class SlackClient:
         })
         return session
         
+    def _print_curl_command(self, method: str, url: str, headers: Dict, data: Optional[str] = None, params: Optional[Dict] = None) -> None:
+        """Print a curl command equivalent to the HTTP request."""
+        cmd = ["curl"]
+        
+        # Add params
+        if params:
+            param_str = "&".join(f"{k}={v}" for k, v in params.items())
+            cmd.append(f"'{url}?{param_str}'")
+        else:
+            cmd.append(f"'{url}'")
+            
+        # Add session headers first
+        for key, value in self.session.headers.items():
+            cmd.append(f"-H '{key}: {value}'")
+            
+        # Add request-specific headers
+        for key, value in headers.items():
+            cmd.append(f"-H '{key}: {value}'")
+            
+        # Add method
+        if method.upper() != "GET":
+            cmd.append(f"-X {method}")
+            
+        # Add data
+        if data:
+            cmd.append(f"--data-raw $'{data}'")
+            
+        print("\nCurl command:")
+        print(" ".join(cmd))
+        print()
+        
     def initialize(self) -> None:
         """Initialize the client by extracting the token."""
         self.token = self._extract_token()
@@ -361,6 +392,9 @@ class ChannelManager:
             if not items:
                 break
                 
+            if self.slack.config.verbose:
+                logging.debug(f"Got {len(items)} channels on page {page}")
+                
             for channel in items:
                 self._process_channel(channel)
                 channels_processed += 1
@@ -370,6 +404,8 @@ class ChannelManager:
                 break
                 
             page += 1
+            if self.slack.config.verbose:
+                print(f"Sleeping for {self.slack.config.rate_limit} seconds")
             time.sleep(self.slack.config.rate_limit)
             
         return channels_processed
@@ -377,12 +413,186 @@ class ChannelManager:
     def _fetch_channel_page(self, page: int, per_page: int) -> List[Dict]:
         """Fetch a single page of channels."""
         url = f"https://{self.slack.config.subdomain}.slack.com/api/search.modules.channels"
-        data = self._build_channel_request_data(page, per_page)
-        headers = self._build_channel_request_headers()
-        params = self._build_channel_request_params()
+        
+        # Create multipart form data
+        boundary = "----WebKitFormBoundaryU4wEmw2oBAuXS3g9"
+        headers = {
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "no-cache",
+            "content-type": f"multipart/form-data; boundary={boundary}",
+            "origin": "https://app.slack.com",
+            "pragma": "no-cache",
+            "priority": "u=1, i",
+            "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site"
+        }
+        
+        # Build the multipart form data
+        form_data = []
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="token"')
+        form_data.append("")
+        form_data.append(self.slack.token)
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="module"')
+        form_data.append("")
+        form_data.append("channels")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="query"')
+        form_data.append("")
+        form_data.append("")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="page"')
+        form_data.append("")
+        form_data.append(str(page))
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="client_req_id"')
+        form_data.append("")
+        form_data.append(self.slack.config.client_req_id or "")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="browse_session_id"')
+        form_data.append("")
+        form_data.append(self.slack.config.browse_session_id or "")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="extracts"')
+        form_data.append("")
+        form_data.append("0")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="highlight"')
+        form_data.append("")
+        form_data.append("0")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="extra_message_data"')
+        form_data.append("")
+        form_data.append("0")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="no_user_profile"')
+        form_data.append("")
+        form_data.append("1")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="count"')
+        form_data.append("")
+        form_data.append(str(per_page))
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="file_title_only"')
+        form_data.append("")
+        form_data.append("false")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="query_rewrite_disabled"')
+        form_data.append("")
+        form_data.append("false")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="include_files_shares"')
+        form_data.append("")
+        form_data.append("1")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="browse"')
+        form_data.append("")
+        form_data.append("standard")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="search_context"')
+        form_data.append("")
+        form_data.append("desktop_channel_browser")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="max_filter_suggestions"')
+        form_data.append("")
+        form_data.append("10")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="sort"')
+        form_data.append("")
+        form_data.append("name")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="sort_dir"')
+        form_data.append("")
+        form_data.append("asc")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="channel_type"')
+        form_data.append("")
+        form_data.append("exclude_archived")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="exclude_my_channels"')
+        form_data.append("")
+        form_data.append("0")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="search_only_team"')
+        form_data.append("")
+        form_data.append(self.slack.config.team_id)
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="search_recently_left_channels"')
+        form_data.append("")
+        form_data.append("false")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="search_recently_joined_channels"')
+        form_data.append("")
+        form_data.append("false")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="_x_reason"')
+        form_data.append("")
+        form_data.append("browser-query")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="_x_mode"')
+        form_data.append("")
+        form_data.append("online")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="_x_sonic"')
+        form_data.append("")
+        form_data.append("true")
+        
+        form_data.append(f"--{boundary}")
+        form_data.append('Content-Disposition: form-data; name="_x_app_name"')
+        form_data.append("")
+        form_data.append("client")
+        
+        form_data.append(f"--{boundary}--")
+        
+        # Join with CRLF
+        data = "\r\n".join(form_data)
+        
+        # Add query parameters to URL
+        params = {
+            "slack_route": f"{self.slack.config.org_id}%3A{self.slack.config.org_id}",
+            "_x_version_ts": f"{self.slack.config.x_version_timestamp}",
+            "_x_frontend_build_type": "current",
+            "_x_desktop_ia": "4",
+            "_x_gantry": "true",
+            "fp": "c7",
+            "_x_num_retries": "0"
+        }
         
         if self.slack.config.verbose:
             logging.debug(f"POST {url}  page={page}")
+            self.slack._print_curl_command("POST", url, headers, data, params)
             
         r = self.slack.session.post(url, headers=headers, data=data, params=params)
         r.raise_for_status()
@@ -461,6 +671,8 @@ class MessageManager:
                         self.db.conn.commit()
                         break
                         
+                    if self.slack.config.verbose:
+                        print(f"Sleeping for {self.slack.config.rate_limit} seconds")
                     time.sleep(self.slack.config.rate_limit)
                 
                 channels_processed += 1
@@ -473,6 +685,8 @@ class MessageManager:
                 """, (channels_processed, messages_processed, sync_run_id))
                 self.db.conn.commit()
                 
+                if self.slack.config.verbose:
+                    print(f"Sleeping for {self.slack.config.rate_limit} seconds")
                 time.sleep(self.slack.config.rate_limit)
             
             # Mark sync run as complete
@@ -526,6 +740,7 @@ class MessageManager:
             
         if self.slack.config.verbose:
             logging.debug(f"GET {url}  cursor={cursor}")
+            self.slack._print_curl_command("GET", url, {}, params=params)
             
         r = self.slack.session.get(url, params=params)
         r.raise_for_status()
@@ -577,6 +792,9 @@ class MessageManager:
                 messages_processed += 1
                 
             self.db.conn.commit()
+            
+            if self.slack.config.verbose:
+                logging.debug(f"  Processed {messages_processed} messages")
             
         except Exception as e:
             self.db.conn.rollback()
