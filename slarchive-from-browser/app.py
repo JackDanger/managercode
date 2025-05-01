@@ -8,383 +8,332 @@ import re
 import logging
 import sys
 import os
+import gzip
 from datetime import datetime
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Optional, List, Dict, Any, Tuple
 
 DB_PATH = "./db.sqlite3"
 
+@dataclass
+class SlackConfig:
+    """Configuration for Slack API access."""
+    subdomain: str
+    org_id: str
+    team_id: str
+    x_version_timestamp: str
+    cookie: str
+    rate_limit: float = 1.0
+    verbose: bool = False
+    client_req_id: Optional[str] = None
+    browse_session_id: Optional[str] = None
 
-def setup_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+class DatabaseManager:
+    """Manages database operations and compression."""
+    
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
+        self.conn = None
+        
+    def connect(self) -> None:
+        """Establish database connection and setup schema."""
+        self.conn = sqlite3.connect(self.db_path)
+        self._setup_schema()
+        
+    def close(self) -> None:
+        """Close database connection."""
+        if self.conn:
+            self.conn.close()
+            
+    def _setup_schema(self) -> None:
+        """Create database tables if they don't exist."""
+        cur = self.conn.cursor()
+        
+        # Create all tables
+        tables = [
+            self._get_sync_state_schema(),
+            self._get_channels_schema(),
+            self._get_messages_schema(),
+            self._get_users_schema(),
+            self._get_sync_runs_schema(),
+            self._get_compressed_data_schema()
+        ]
+        
+        for schema in tables:
+            cur.execute(schema)
+            
+        self.conn.commit()
+        
+    def _get_sync_state_schema(self) -> str:
+        return """
+        CREATE TABLE IF NOT EXISTS sync_state (
+            channel_id TEXT PRIMARY KEY,
+            last_sync_ts TEXT,
+            last_sync_cursor TEXT,
+            is_fully_synced BOOLEAN DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        
+    def _get_channels_schema(self) -> str:
+        return """
+        CREATE TABLE IF NOT EXISTS channels (
+            id       TEXT PRIMARY KEY,
+            name     TEXT,
+            raw_json TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        
+    def _get_messages_schema(self) -> str:
+        return """
+        CREATE TABLE IF NOT EXISTS messages (
+            channel_id TEXT,
+            ts TEXT,
+            thread_ts TEXT,
+            user_id TEXT,
+            subtype TEXT,
+            client_msg_id TEXT,
+            edited_ts TEXT,
+            edited_user TEXT,
+            reply_count INTEGER,
+            reply_users_count INTEGER,
+            latest_reply TEXT,
+            is_locked BOOLEAN,
+            has_files BOOLEAN,
+            has_blocks BOOLEAN,
+            raw_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (channel_id, ts)
+        );
+        """
+        
+    def _get_users_schema(self) -> str:
+        return """
+        CREATE TABLE IF NOT EXISTS users (
+            id         TEXT PRIMARY KEY,
+            name       TEXT,
+            real_name  TEXT,
+            display_name TEXT,
+            raw_json   TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        
+    def _get_sync_runs_schema(self) -> str:
+        return """
+        CREATE TABLE IF NOT EXISTS sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            finished_at TIMESTAMP,
+            status TEXT,
+            error TEXT,
+            channels_processed INTEGER DEFAULT 0,
+            messages_processed INTEGER DEFAULT 0
+        );
+        """
+        
+    def _get_compressed_data_schema(self) -> str:
+        return """
+        CREATE TABLE IF NOT EXISTS compressed_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            table_name TEXT NOT NULL,
+            record_id TEXT NOT NULL,
+            compressed_data BLOB NOT NULL,
+            original_size INTEGER NOT NULL,
+            compressed_size INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(table_name, record_id)
+        );
+        """
+        
+    def compress_data(self, data: str) -> bytes:
+        """Compress data using gzip."""
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+        return gzip.compress(data)
+        
+    def decompress_data(self, compressed_data: bytes) -> Optional[str]:
+        """Decompress gzip data."""
+        if compressed_data is None:
+            return None
+        return gzip.decompress(compressed_data).decode('utf-8')
+        
+    def store_compressed_data(self, table_name: str, record_id: str, data: str) -> None:
+        """Store compressed data in the compressed_data table."""
+        if not data:
+            return
+            
+        compressed = self.compress_data(data)
+        original_size = len(data.encode('utf-8') if isinstance(data, str) else data)
+        compressed_size = len(compressed)
+        
+        cur = self.conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO compressed_data 
+            (table_name, record_id, compressed_data, original_size, compressed_size, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (table_name, record_id, compressed, original_size, compressed_size))
+        self.conn.commit()
+        
+    def get_compressed_data(self, table_name: str, record_id: str) -> Optional[str]:
+        """Retrieve and decompress data from the compressed_data table."""
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT compressed_data 
+            FROM compressed_data 
+            WHERE table_name = ? AND record_id = ?
+        """, (table_name, record_id))
+        
+        row = cur.fetchone()
+        if row:
+            return self.decompress_data(row[0])
+        return None
 
-    # Track sync state for each channel
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS sync_state (
-        channel_id TEXT PRIMARY KEY,
-        last_sync_ts TEXT,
-        last_sync_cursor TEXT,
-        is_fully_synced BOOLEAN DEFAULT 0,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    """)
-
-    # Track channels
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS channels (
-        id       TEXT PRIMARY KEY,
-        name     TEXT,
-        raw_json TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    """)
-
-    # Track messages with additional metadata
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS messages (
-        channel_id TEXT,
-        ts TEXT,
-        thread_ts TEXT,
-        user_id TEXT,
-        subtype TEXT,
-        client_msg_id TEXT,
-        edited_ts TEXT,
-        edited_user TEXT,
-        reply_count INTEGER,
-        reply_users_count INTEGER,
-        latest_reply TEXT,
-        is_locked BOOLEAN,
-        has_files BOOLEAN,
-        has_blocks BOOLEAN,
-        raw_json TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (channel_id, ts)
-      );
-    """)
-
-    # Track users
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS users (
-        id         TEXT PRIMARY KEY,
-        name       TEXT,
-        real_name  TEXT,
-        display_name TEXT,
-        raw_json   TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    """)
-
-    # Track sync runs for debugging/auditing
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS sync_runs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        finished_at TIMESTAMP,
-        status TEXT,
-        error TEXT,
-        channels_processed INTEGER DEFAULT 0,
-        messages_processed INTEGER DEFAULT 0
-      );
-    """)
-
-    conn.commit()
-    return conn
-
-
-def extract_token(session, base_url, verbose=False):
-    """Fetch homepage and extract api_token and team_id via regex."""
-    url = f"{base_url}/"
-    if verbose:
-        logging.debug(f"GET {url}")
-    r = session.get(url)
-    r.raise_for_status()
-    html = r.text
-
-    token_m = re.search(r'"api_token":"([^"]+)"', html)
-    if not token_m:
-        logging.error("Failed to extract api_token from homepage")
-        sys.exit(1)
-    token = token_m.group(1)
-    if verbose:
-        logging.debug(f"Extracted token={token[:10]}")
-    return token
-
-
-def print_curl_command(method, url, headers, data=None, params=None, session_headers=None):
-    """Print a curl command equivalent to the HTTP request."""
-
-    # Add params
-    if params:
-        param_str = "&".join(f"{k}={v}" for k, v in params.items())
-
-    cmd = ["curl"]
-    cmd.append(f"'{url}?{param_str}'")
-
-    # Add session headers first (like User-Agent and Cookie)
-    if session_headers:
-        for key, value in session_headers.items():
-            cmd.append(f"-H '{key}: {value}'")
-
-    # Add request-specific headers
-    for key, value in headers.items():
-        cmd.append(f"-H '{key}: {value}'")
-
-    # Add method
-    if method.upper() != "GET":
-        cmd.append(f"-X {method}")
-
-    # Add data
-    if data:
-        cmd.append(f"--data-raw $'{data}'")
-
-    print("\nCurl command:")
-    print(" ".join(cmd))
-    print()
-
-
-def fetch_all_channels(session, base_url, token, org_id, team_id, x_version_timestamp, db_conn, rate_limit, verbose,
-                      client_req_id, browse_session_id):
-    cur = db_conn.cursor()
-    page = 1
-    per_page = 50
-    channels_processed = 0
-
-    while True:
-        # Create multipart form data
-        boundary = "----WebKitFormBoundaryU4wEmw2oBAuXS3g9"
-        headers = {
-            "accept": "*/*",
-            "accept-language": "en-US,en;q=0.9",
-            "cache-control": "no-cache",
-            "content-type": f"multipart/form-data; boundary={boundary}",
-            "origin": "https://app.slack.com",
-            "pragma": "no-cache",
-            "priority": "u=1, i",
-            "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"macOS"',
-            "sec-fetch-dest": "empty",
-            "sec-fetch-mode": "cors",
-            "sec-fetch-site": "same-site"
-        }
-
-        # Build the multipart form data
-        form_data = []
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="token"')
-        form_data.append("")
-        form_data.append(token)
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="module"')
-        form_data.append("")
-        form_data.append("channels")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="query"')
-        form_data.append("")
-        form_data.append("")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="page"')
-        form_data.append("")
-        form_data.append(str(page))
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="client_req_id"')
-        form_data.append("")
-        form_data.append(client_req_id)
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="browse_session_id"')
-        form_data.append("")
-        form_data.append(browse_session_id)
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="extracts"')
-        form_data.append("")
-        form_data.append("0")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="highlight"')
-        form_data.append("")
-        form_data.append("0")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="extra_message_data"')
-        form_data.append("")
-        form_data.append("0")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="no_user_profile"')
-        form_data.append("")
-        form_data.append("1")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="count"')
-        form_data.append("")
-        form_data.append(str(per_page))
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="file_title_only"')
-        form_data.append("")
-        form_data.append("false")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="query_rewrite_disabled"')
-        form_data.append("")
-        form_data.append("false")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="include_files_shares"')
-        form_data.append("")
-        form_data.append("1")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="browse"')
-        form_data.append("")
-        form_data.append("standard")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="search_context"')
-        form_data.append("")
-        form_data.append("desktop_channel_browser")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="max_filter_suggestions"')
-        form_data.append("")
-        form_data.append("10")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="sort"')
-        form_data.append("")
-        form_data.append("name")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="sort_dir"')
-        form_data.append("")
-        form_data.append("asc")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="channel_type"')
-        form_data.append("")
-        form_data.append("exclude_archived")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="exclude_my_channels"')
-        form_data.append("")
-        form_data.append("0")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="search_only_team"')
-        form_data.append("")
-        form_data.append(team_id)
-
-        # form_data.append(f"--{boundary}")
-        # form_data.append('Content-Disposition: form-data; name="search_only_my_channels"')
-        # form_data.append("")
-        # form_data.append("false")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="search_recently_left_channels"')
-        form_data.append("")
-        form_data.append("false")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="search_recently_joined_channels"')
-        form_data.append("")
-        form_data.append("false")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="_x_reason"')
-        form_data.append("")
-        form_data.append("browser-query")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="_x_mode"')
-        form_data.append("")
-        form_data.append("online")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="_x_sonic"')
-        form_data.append("")
-        form_data.append("true")
-
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="_x_app_name"')
-        form_data.append("")
-        form_data.append("client")
-
-        form_data.append(f"--{boundary}--")
-
-        # Join with CRLF
-        data = "\r\n".join(form_data)
-
-        # Add query parameters to URL
-        url = f"{base_url}/api/search.modules.channels"
-        params = {
-            "slack_route": f"{org_id}%3A{org_id}",
-            "_x_version_ts": f"{x_version_timestamp}",
-            "_x_frontend_build_type": "current",
-            "_x_desktop_ia": "4",
-            "_x_gantry": "true",
-            "fp": "c7",
-            "_x_num_retries": "0"
-        }
-
-        if verbose:
-            logging.debug(f"POST {url}  page={page}")
-            # print_curl_command("POST", url, headers, data, params=params, session_headers=session.headers)
-
-        r = session.post(url, headers=headers, data=data, params=params)
+class SlackClient:
+    """Handles Slack API interactions."""
+    
+    def __init__(self, config: SlackConfig):
+        self.config = config
+        self.session = self._create_session()
+        self.token = None
+        
+    def _create_session(self) -> requests.Session:
+        """Create and configure requests session."""
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (compatible; SlackArchiver/1.0)",
+            "Cookie": self.config.cookie,
+        })
+        return session
+        
+    def initialize(self) -> None:
+        """Initialize the client by extracting the token."""
+        self.token = self._extract_token()
+        
+    def _extract_token(self) -> str:
+        """Extract API token from Slack homepage."""
+        url = f"https://{self.config.subdomain}.slack.com/"
+        if self.config.verbose:
+            logging.debug(f"GET {url}")
+            
+        r = self.session.get(url)
         r.raise_for_status()
-        j = r.json()
-        # adjust this if your workspace returns under a different key
-        items = j.get("items")
-        if verbose:
-            logging.debug(f"Got {len(items)} channels on page {page}")
-        if not items:
-            break
-        for ch in items:
-            ch_id = ch.get("id") or ch.get("channel", {}).get("id")
-            ch_name = ch.get("name") or ch.get("channel", {}).get("name")
-            raw = json.dumps(ch, separators=(",", ":"))
+        
+        token_m = re.search(r'"api_token":"([^"]+)"', r.text)
+        if not token_m:
+            raise ValueError("Failed to extract api_token from homepage")
+            
+        token = token_m.group(1)
+        if self.config.verbose:
+            logging.debug(f"Extracted token={token[:10]}")
+        return token
 
-            # Update channel info and reset sync state if needed
-            cur.execute("""
-                INSERT OR REPLACE INTO channels (id, name, raw_json, updated_at)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            """, (ch_id, ch_name, raw))
+class ChannelManager:
+    """Manages channel-related operations."""
+    
+    def __init__(self, db: DatabaseManager, slack: SlackClient):
+        self.db = db
+        self.slack = slack
+        
+    def fetch_all_channels(self) -> int:
+        """Fetch all channels from Slack."""
+        cur = self.db.conn.cursor()
+        page = 1
+        per_page = 50
+        channels_processed = 0
+        
+        while True:
+            items = self._fetch_channel_page(page, per_page)
+            if not items:
+                break
+                
+            for channel in items:
+                self._process_channel(channel)
+                channels_processed += 1
+                
+            self.db.conn.commit()
+            if len(items) < per_page:
+                break
+                
+            page += 1
+            time.sleep(self.slack.config.rate_limit)
+            
+        return channels_processed
+        
+    def _fetch_channel_page(self, page: int, per_page: int) -> List[Dict]:
+        """Fetch a single page of channels."""
+        url = f"https://{self.slack.config.subdomain}.slack.com/api/search.modules.channels"
+        data = self._build_channel_request_data(page, per_page)
+        headers = self._build_channel_request_headers()
+        params = self._build_channel_request_params()
+        
+        if self.slack.config.verbose:
+            logging.debug(f"POST {url}  page={page}")
+            
+        r = self.slack.session.post(url, headers=headers, data=data, params=params)
+        r.raise_for_status()
+        return r.json().get("items", [])
+        
+    def _process_channel(self, channel: Dict) -> None:
+        """Process and store a single channel."""
+        ch_id = channel.get("id") or channel.get("channel", {}).get("id")
+        ch_name = channel.get("name") or channel.get("channel", {}).get("name")
+        raw = json.dumps(channel, separators=(",", ":"))
+        
+        cur = self.db.conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO channels (id, name, raw_json, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        """, (ch_id, ch_name, None))
+        
+        self.db.store_compressed_data('channels', ch_id, raw)
+        
+        cur.execute("""
+            INSERT OR IGNORE INTO sync_state (channel_id, is_fully_synced)
+            VALUES (?, 0)
+        """, (ch_id,))
 
-            # Initialize sync state if it doesn't exist
-            cur.execute("""
-                INSERT OR IGNORE INTO sync_state (channel_id, is_fully_synced)
-                VALUES (?, 0)
-            """, (ch_id,))
-
-            channels_processed += 1
-
-        db_conn.commit()
-        if len(items) < per_page:
-            break
-        page += 1
-        print(f"sleeping for {rate_limit} seconds")
-        time.sleep(rate_limit)
-
-
-def fetch_channel_history(session, base_url, token, db_conn, rate_limit, verbose):
-    cur = db_conn.cursor()
-    cur2 = db_conn.cursor()
-    cur3 = db_conn.cursor()
-
-    # Start a new sync run
-    cur.execute("INSERT INTO sync_runs (status) VALUES ('in_progress')")
-    sync_run_id = cur.lastrowid
-    db_conn.commit()
-
-    try:
-        # Get channels that need syncing
+class MessageManager:
+    """Manages message-related operations."""
+    
+    def __init__(self, db: DatabaseManager, slack: SlackClient):
+        self.db = db
+        self.slack = slack
+        
+    def fetch_channel_history(self) -> Tuple[int, int]:
+        """Fetch message history for all channels."""
+        cur = self.db.conn.cursor()
+        cur.execute("INSERT INTO sync_runs (status) VALUES ('in_progress')")
+        sync_run_id = cur.lastrowid
+        self.db.conn.commit()
+        
+        try:
+            channels_to_sync = self._get_channels_to_sync()
+            channels_processed = 0
+            messages_processed = 0
+            
+            for channel in channels_to_sync:
+                messages = self._fetch_channel_messages(channel)
+                messages_processed += len(messages)
+                channels_processed += 1
+                
+                self._update_sync_progress(sync_run_id, channels_processed, messages_processed)
+                time.sleep(self.slack.config.rate_limit)
+                
+            self._complete_sync_run(sync_run_id, channels_processed, messages_processed)
+            return channels_processed, messages_processed
+            
+        except Exception as e:
+            self._fail_sync_run(sync_run_id, str(e))
+            raise
+            
+    def _get_channels_to_sync(self) -> List[Tuple]:
+        """Get list of channels that need syncing."""
+        cur = self.db.conn.cursor()
         cur.execute("""
             SELECT c.id, c.name, s.last_sync_ts, s.last_sync_cursor
             FROM channels c
@@ -392,572 +341,106 @@ def fetch_channel_history(session, base_url, token, db_conn, rate_limit, verbose
             WHERE s.is_fully_synced = 0 OR s.is_fully_synced IS NULL
             ORDER BY s.last_sync_ts ASC NULLS FIRST
         """)
+        return cur.fetchall()
 
-        channels_to_sync = cur.fetchall()
-        channels_processed = 0
-        messages_processed = 0
-
-        for ch_id, ch_name, last_sync_ts, last_cursor in channels_to_sync:
-            if verbose:
-                logging.info(f"Fetching history for #{ch_name} ({ch_id})")
-                if last_sync_ts:
-                    logging.info(f"  Resuming from {last_sync_ts}")
-
-            cursor = last_cursor
-            while True:
-                params = {
-                    "token": token,
-                    "channel": ch_id,
-                    "limit": 200,
-                }
-                if cursor:
-                    params["cursor"] = cursor
-
-                url = f"{base_url}/api/conversations.history"
-                if verbose:
-                    logging.debug(f"GET {url}  cursor={cursor}")
-
-                r = session.get(url, params=params)
-                r.raise_for_status()
-                j = r.json()
-                msgs = j.get("messages", [])
-
-                # Process messages
-                for m in msgs:
-                    ts = m.get("ts")
-                    raw = json.dumps(m, separators=(",", ":"))
-
-                    # Use INSERT OR REPLACE to update existing messages
-                    cur2.execute("""
-                        INSERT OR REPLACE INTO messages
-                        (channel_id, ts, thread_ts, user_id, subtype, client_msg_id,
-                         edited_ts, edited_user, reply_count, reply_users_count,
-                         latest_reply, is_locked, has_files, has_blocks, raw_json, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, (
-                        ch_id,
-                        ts,
-                        m.get("thread_ts"),
-                        m.get("user"),
-                        m.get("subtype"),
-                        m.get("client_msg_id"),
-                        m.get("edited", {}).get("ts"),
-                        m.get("edited", {}).get("user"),
-                        m.get("reply_count"),
-                        m.get("reply_users_count"),
-                        m.get("latest_reply"),
-                        bool(m.get("is_locked")),
-                        bool(m.get("files")),
-                        bool(m.get("blocks")),
-                        raw
-                    ))
-
-                    messages_processed += 1
-
-                db_conn.commit()
-
-                # Update sync state
-                if msgs:
-                    oldest_ts = min(m.get("ts") for m in msgs)
-                    cur3.execute("""
-                        INSERT OR REPLACE INTO sync_state
-                        (channel_id, last_sync_ts, last_sync_cursor, updated_at)
-                        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-                    """, (ch_id, oldest_ts, cursor))
-                    db_conn.commit()
-
-                cursor = j.get("response_metadata", {}).get("next_cursor")
-                if verbose:
-                    logging.debug(f"  fetched {len(msgs)} msgs, next_cursor={cursor}")
-
-                if not cursor:
-                    # Mark channel as fully synced if we've reached the end
-                    cur3.execute("""
-                        UPDATE sync_state
-                        SET is_fully_synced = 1, updated_at = CURRENT_TIMESTAMP
-                        WHERE channel_id = ?
-                    """, (ch_id,))
-                    db_conn.commit()
+class UserManager:
+    """Manages user-related operations."""
+    
+    def __init__(self, db: DatabaseManager, slack: SlackClient):
+        self.db = db
+        self.slack = slack
+        
+    def fetch_all_users(self) -> int:
+        """Fetch all users from Slack."""
+        marker = None
+        users_processed = 0
+        retry_count = 0
+        max_retries = 3
+        
+        while True:
+            try:
+                users = self._fetch_user_page(marker)
+                if not users:
                     break
-
-                time.sleep(rate_limit)
-
-            channels_processed += 1
-
-            # Update sync run progress
-            cur.execute("""
-                UPDATE sync_runs
-                SET channels_processed = ?, messages_processed = ?
-                WHERE id = ?
-            """, (channels_processed, messages_processed, sync_run_id))
-            db_conn.commit()
-
-            time.sleep(rate_limit)
-
-        # Mark sync run as complete
-        cur.execute("""
-            UPDATE sync_runs
-            SET status = 'completed',
-                finished_at = CURRENT_TIMESTAMP,
-                channels_processed = ?,
-                messages_processed = ?
-            WHERE id = ?
-        """, (channels_processed, messages_processed, sync_run_id))
-        db_conn.commit()
-
-    except Exception as e:
-        # Log error and mark sync run as failed
-        logging.error(f"Sync failed: {str(e)}")
-        cur.execute("""
-            UPDATE sync_runs
-            SET status = 'failed',
-                error = ?,
-                finished_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-        """, (str(e), sync_run_id))
-        db_conn.commit()
-        raise
-
-
-def fetch_all_users(session, org_id, token, rate_limit, verbose, db_conn):
-    """Fetch all users from Slack, handling pagination."""
-    cur = db_conn.cursor()
-    marker = None
-    users_processed = 0
-    retry_count = 0
-    max_retries = 3
-    
-    while True:
-        try:
-            # Prepare the request
-            url = f"https://edgeapi.slack.com/cache/{org_id}/users/list"
-            params = {
-                "_x_app_name": "client",
-                "fp": "c7",
-                "_x_num_retries": "0"
-            }
-            
-            data = {
-                "token": token,
-                "count": 1000,
-                "present_first": True,
-                "enterprise_token": token
-            }
-            
-            if marker:
-                data["marker"] = marker
-            
-            headers = {
-                "accept": "*/*",
-                "accept-language": "en-US,en;q=0.9",
-                "cache-control": "no-cache",
-                "content-type": "text/plain;charset=UTF-8",
-                "origin": "https://app.slack.com",
-                "pragma": "no-cache",
-                "priority": "u=1, i",
-                "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"macOS"',
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-site"
-            }
-            
-            if verbose:
-                logging.debug(f"POST {url}  marker={marker}")
-            
-            # print_curl_command("POST", url, headers, params=params, data=data, session_headers=session.headers)
-            r = session.post(url, params=params, headers=headers, json=data)
-            r.raise_for_status()
-            j = r.json()
-            
-            # Process users
-            users = j.get("results", [])
-            if verbose:
-                logging.debug(f"Got {len(users)} users")
-            
-            # Start transaction for bulk insert
-            db_conn.execute("BEGIN TRANSACTION")
-            
-            for user in users:
-                user_id = user.get("id")
-                if not user_id:
-                    continue
                     
-                # Validate required fields
-                name = user.get("name", "").strip()
-                real_name = user.get("real_name", "").strip()
-                display_name = user.get("profile", {}).get("display_name", "").strip()
+                users_processed += self._process_users(users)
+                marker = self._get_next_marker()
                 
-                if not any([name, real_name, display_name]):
-                    logging.warning(f"Skipping user {user_id} - no valid name found")
-                    continue
+                if not marker:
+                    break
+                    
+                time.sleep(self.slack.config.rate_limit)
                 
-                # Store user data
-                cur.execute("""
-                    INSERT OR REPLACE INTO users 
-                    (id, name, real_name, display_name, raw_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """, (
-                    user_id,
-                    name,
-                    real_name,
-                    display_name,
-                    json.dumps(user, separators=(",", ":"))
-                ))
+            except (requests.RequestException, json.JSONDecodeError) as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    raise
+                    
+                logging.warning(f"Error fetching users (attempt {retry_count}/{max_retries}): {str(e)}")
+                time.sleep(self.slack.config.rate_limit * 2)
                 
-                users_processed += 1
-            
-            db_conn.commit()
-            retry_count = 0  # Reset retry count on success
-            
-            # Check for more pages
-            marker = j.get("next_marker")
-            if not marker:
-                break
-                
-            time.sleep(rate_limit)
-            
-        except (requests.RequestException, json.JSONDecodeError) as e:
-            retry_count += 1
-            if retry_count >= max_retries:
-                logging.error(f"Failed to fetch users after {max_retries} retries: {str(e)}")
-                db_conn.rollback()
-                raise
-            
-            logging.warning(f"Error fetching users (attempt {retry_count}/{max_retries}): {str(e)}")
-            db_conn.rollback()
-            time.sleep(rate_limit * 2)  # Exponential backoff
-    
-    if verbose:
-        logging.info(f"Processed {users_processed} users")
-    
-    return users_processed
+        return users_processed
 
-
-def get_user_display_name(db_conn, user_id):
-    """Get the best available display name for a user."""
-    if not user_id:
-        return "Unknown"
+class Exporter:
+    """Handles data export operations."""
+    
+    def __init__(self, db: DatabaseManager):
+        self.db = db
         
-    cur = db_conn.cursor()
-    cur.execute("""
-        SELECT real_name, display_name, name
-        FROM users
-        WHERE id = ?
-    """, (user_id,))
-    
-    row = cur.fetchone()
-    if not row:
-        return f"<@{user_id}>"
-    
-    real_name, display_name, name = row
-    
-    # Return the first non-empty name in order of preference
-    return display_name or real_name or name or f"<@{user_id}>"
-
-
-def export_for_axolotl(db_conn, output_dir):
-    """Export the database contents into a format suitable for Axolotl fine-tuning."""
-    import os
-    import json
-    from datetime import datetime
-    from collections import defaultdict
-    import tempfile
-    import shutil
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(output_dir, exist_ok=True)
-    
-    cur = db_conn.cursor()
-    
-    # Get all channels
-    cur.execute("SELECT id, name FROM channels")
-    channels = cur.fetchall()
-    
-    total_conversations = 0
-    max_conversation_size = 100  # Maximum messages per conversation
-    
-    # Store channel filenames for dataset config
-    channel_files = []
-    
-    # Create a dataset file for each channel
-    for channel_id, channel_name in channels:
-        try:
-            # Get all messages for this channel, including thread information
-            cur.execute("""
-                SELECT 
-                    m.raw_json,
-                    m.ts,
-                    m.thread_ts,
-                    CASE 
-                        WHEN m.thread_ts IS NULL THEN m.ts 
-                        ELSE m.thread_ts 
-                    END as conversation_id
-                FROM messages m
-                WHERE m.channel_id = ?
-                ORDER BY conversation_id, m.ts ASC
-            """, (channel_id,))
-            
-            # Group messages by conversation (either thread or time-based)
-            conversations = defaultdict(list)
-            current_conversation = []
-            last_ts = None
-            last_conversation_id = None
-            
-            for raw_json, ts, thread_ts, conversation_id in cur.fetchall():
-                try:
-                    msg = json.loads(raw_json)
-                except json.JSONDecodeError:
-                    logging.warning(f"Invalid JSON in message {ts} from channel {channel_id}")
-                    continue
-                
-                # Skip messages without text
-                if not msg.get('text'):
-                    continue
-                
-                try:
-                    # Get message timestamp
-                    ts_float = float(ts)
-                except (ValueError, TypeError):
-                    logging.warning(f"Invalid timestamp {ts} in message from channel {channel_id}")
-                    continue
-                
-                # Start a new conversation if:
-                # 1. This is the first message
-                # 2. There's a significant time gap (> 2 hours)
-                # 3. The conversation ID has changed
-                # 4. Current conversation is too large
-                if (last_ts is None or 
-                    ts_float - last_ts > 7200 or  # 2 hour gap
-                    conversation_id != last_conversation_id or
-                    len(current_conversation) >= max_conversation_size):
-                    
-                    # Save previous conversation if it exists and has multiple messages
-                    if len(current_conversation) > 1:
-                        conversations[last_conversation_id] = current_conversation
-                    
-                    # Start new conversation
-                    current_conversation = []
-                
-                # Get user display name
-                user_id = msg.get('user')
-                user_name = get_user_display_name(db_conn, user_id) if user_id else "Slack"
-                
-                # Add message to current conversation
-                current_conversation.append({
-                    "role": "user" if user_id else "assistant",
-                    "content": msg['text'],
-                    "ts": ts,
-                    "thread_ts": thread_ts,
-                    "user": user_name,
-                    "reactions": msg.get('reactions', []),
-                    "is_thread_parent": thread_ts is None and msg.get('thread_ts') is not None
-                })
-                
-                last_ts = ts_float
-                last_conversation_id = conversation_id
-            
-            # Add the last conversation if it has multiple messages
-            if len(current_conversation) > 1:
-                conversations[last_conversation_id] = current_conversation
-            
-            # Convert conversations to Axolotl format
-            axolotl_conversations = []
-            for conv_id, messages in conversations.items():
-                # Skip conversations with only one message
-                if len(messages) < 2:
+    def export_for_axolotl(self, output_dir: str) -> None:
+        """Export database contents for Axolotl fine-tuning."""
+        os.makedirs(output_dir, exist_ok=True)
+        
+        channels = self._get_all_channels()
+        channel_files = []
+        total_conversations = 0
+        
+        for channel_id, channel_name in channels:
+            try:
+                conversations = self._process_channel_conversations(channel_id, channel_name)
+                if not conversations:
                     continue
                     
-                # Format conversation for Axolotl
-                conversation = {
-                    "messages": [
-                        {
-                            "role": msg["role"],
-                            "content": f"{msg['user']}: {msg['content']}"
-                        }
-                        for msg in messages
-                    ],
-                    "metadata": {
-                        "channel": channel_name,
-                        "channel_id": channel_id,
-                        "conversation_id": conv_id,
-                        "message_count": len(messages),
-                        "is_thread": messages[0]["thread_ts"] is not None,
-                        "participants": len(set(msg["user"] for msg in messages)),
-                        "has_reactions": any(msg["reactions"] for msg in messages)
-                    }
-                }
-                axolotl_conversations.append(conversation)
-            
-            # Skip channels with no conversations
-            if not axolotl_conversations:
+                output_path = self._write_channel_file(channel_id, channel_name, conversations, output_dir)
+                channel_files.append({"path": output_path, "type": "conversation"})
+                total_conversations += len(conversations)
+                
+            except Exception as e:
+                logging.error(f"Error processing channel {channel_name}: {str(e)}")
                 continue
-            
-            # Create the dataset file
-            dataset = {
-                "type": "conversation",
-                "conversations": axolotl_conversations,
-                "channel": channel_name,
-                "channel_id": channel_id,
-                "stats": {
-                    "total_conversations": len(axolotl_conversations),
-                    "total_messages": sum(len(conv["messages"]) for conv in axolotl_conversations),
-                    "avg_messages_per_conversation": sum(len(conv["messages"]) for conv in axolotl_conversations) / len(axolotl_conversations),
-                    "thread_count": sum(1 for conv in axolotl_conversations if conv["metadata"]["is_thread"])
-                }
-            }
-            
-            # Write to temporary file first
-            safe_name = "".join(c if c.isalnum() else "_" for c in channel_name)
-            filename = f"{safe_name}_{channel_id}.json"
-            output_path = os.path.join(output_dir, filename)
-            
-            with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
-                json.dump(dataset, temp_file, indent=2)
-                temp_path = temp_file.name
-            
-            # Atomic move to final location
-            shutil.move(temp_path, output_path)
-            
-            # Store filename for dataset config
-            channel_files.append({
-                "path": output_path,
-                "type": "conversation"
-            })
-            
-            total_conversations += len(axolotl_conversations)
-            print(f"Exported {len(axolotl_conversations)} conversations from #{channel_name} to {output_path}")
-            print(f"  - Average messages per conversation: {dataset['stats']['avg_messages_per_conversation']:.1f}")
-            print(f"  - Thread conversations: {dataset['stats']['thread_count']}")
-            
-        except Exception as e:
-            logging.error(f"Error processing channel {channel_name}: {str(e)}")
-            continue
-    
-    try:
-        # Create metadata file
-        metadata = {
-            "export_date": datetime.now().isoformat(),
-            "total_conversations": total_conversations,
-            "channels": len(channels),
-            "format": "axolotl-conversation",
-            "version": "1.0",
-            "channel_list": [name for _, name in channels]
-        }
-        
-        # Create dataset config file for Axolotl
-        dataset_config = {
-            "datasets": channel_files
-        }
-        
-        # Write metadata files atomically
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
-            json.dump(metadata, temp_file, indent=2)
-            temp_path = temp_file.name
-        shutil.move(temp_path, os.path.join(output_dir, "metadata.json"))
-        
-        with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp_file:
-            json.dump(dataset_config, temp_file, indent=2)
-            temp_path = temp_file.name
-        shutil.move(temp_path, os.path.join(output_dir, "axolotl_config.json"))
-        
-        print(f"\nExported {total_conversations} total conversations from {len(channels)} channels")
-        print(f"To train on all channels, use the generated axolotl_config.json")
-        
-    except Exception as e:
-        logging.error(f"Error writing metadata files: {str(e)}")
-        raise
-
+                
+        self._write_metadata_files(output_dir, total_conversations, channels, channel_files)
 
 def main():
-    p = argparse.ArgumentParser(
-        description="Archive Slack channels via in-browser endpoints"
-    )
+    """Main entry point."""
+    args = parse_args()
+    setup_logging(args.verbose)
     
-    # Create a mutually exclusive group for the two modes
-    mode_group = p.add_mutually_exclusive_group(required=True)
-    mode_group.add_argument(
-        "subdomain", nargs="?", help="Slack workspace subdomain (e.g. datavant.enterprise)"
-    )
-    mode_group.add_argument(
-        "--dump-axolotl",
-        help="Export database contents for Axolotl fine-tuning to the specified directory"
-    )
+    db = DatabaseManager()
+    db.connect()
     
-    # Add all other arguments as optional
-    p.add_argument(
-        "--org", help="Which specific Slack org the cookie is signed into"
-    )
-    p.add_argument(
-        "--x-version-timestamp",
-        help="X-Version-Timestamp from the Slack homepage"
-    )
-    p.add_argument(
-        "--team", help="Which specific Slack team the cookie is signed into"
-    )
-    p.add_argument(
-        "--cookie", help="Your full Slack session cookie string"
-    )
-    p.add_argument(
-        "--rate-limit",
-        type=float,
-        default=1.0,
-        help="Seconds to wait between HTTP requests",
-    )
-    p.add_argument("--verbose", action="store_true", help="Enable debug logging")
-    p.add_argument(
-        "--client-req-id",
-        help="Client request ID for API calls"
-    )
-    p.add_argument(
-        "--browse-session-id",
-        help="Browse session ID for API calls"
-    )
-    args = p.parse_args()
-
-    lvl = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=lvl, format="%(asctime)s %(levelname)s %(message)s")
-
-    # DB
-    conn = setup_db()
-
-    # If dump-axolotl is specified, export the data and exit
-    if args.dump_axolotl:
-        export_for_axolotl(conn, args.dump_axolotl)
-        conn.close()
-        return
-
-    # For archive mode, validate required arguments
-    if not all([args.subdomain, args.org, args.x_version_timestamp, args.team, args.cookie]):
-        p.error("When archiving (not using --dump-axolotl), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie")
-
-    base_url = f"https://{args.subdomain}.slack.com"
-    # build session
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (compatible; SlackArchiver/1.0)",
-        "Cookie": args.cookie,
-    })
-
-    # Get internal token
-    token = extract_token(session, base_url, args.verbose)
-
-    # Fetch all users first
-    fetch_all_users(session, args.org, token, args.rate_limit, args.verbose, conn)
-
-    # Enumerate channels
-    fetch_all_channels(
-        session, base_url, token, args.org, args.team, args.x_version_timestamp, conn, args.rate_limit, args.verbose,
-        args.client_req_id, args.browse_session_id
-    )
-
-    # Fetch history for each channel
-    fetch_channel_history(session, base_url, token, conn, args.rate_limit, args.verbose)
-
-    logging.info("Done! Archive stored in %s", DB_PATH)
-    conn.close()
-
+    try:
+        if args.dump_axolotl:
+            exporter = Exporter(db)
+            exporter.export_for_axolotl(args.dump_axolotl)
+            return
+            
+        config = create_slack_config(args)
+        slack = SlackClient(config)
+        slack.initialize()
+        
+        user_manager = UserManager(db, slack)
+        channel_manager = ChannelManager(db, slack)
+        message_manager = MessageManager(db, slack)
+        
+        user_manager.fetch_all_users()
+        channel_manager.fetch_all_channels()
+        message_manager.fetch_channel_history()
+        
+        logging.info("Done! Archive stored in %s", DB_PATH)
+        
+    finally:
+        db.close()
 
 if __name__ == "__main__":
     main()
