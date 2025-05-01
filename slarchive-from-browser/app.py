@@ -49,6 +49,27 @@ class DatabaseManager:
         if self.conn:
             self.conn.close()
             
+    def get_user_display_name(self, user_id: str) -> str:
+        """Get the best available display name for a user."""
+        if not user_id:
+            return "Unknown"
+            
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT real_name, display_name, name
+            FROM users
+            WHERE id = ?
+        """, (user_id,))
+        
+        row = cur.fetchone()
+        if not row:
+            return f"<@{user_id}>"
+        
+        real_name, display_name, name = row
+        
+        # Return the first non-empty name in order of preference
+        return display_name or real_name or name or f"<@{user_id}>"
+            
     def _setup_schema(self) -> None:
         """Create database tables if they don't exist."""
         cur = self.conn.cursor()
@@ -405,19 +426,79 @@ class MessageManager:
             channels_processed = 0
             messages_processed = 0
             
-            for channel in channels_to_sync:
-                messages = self._fetch_channel_messages(channel)
-                messages_processed += len(messages)
+            for ch_id, ch_name, last_sync_ts, last_cursor in channels_to_sync:
+                if self.slack.config.verbose:
+                    logging.info(f"Fetching history for #{ch_name} ({ch_id})")
+                    if last_sync_ts:
+                        logging.info(f"  Resuming from {last_sync_ts}")
+                
+                cursor = last_cursor
+                while True:
+                    messages = self._fetch_channel_messages(ch_id, cursor)
+                    if not messages:
+                        break
+                        
+                    messages_processed += self._process_messages(ch_id, messages)
+                    
+                    # Update sync state
+                    if messages:
+                        oldest_ts = min(m.get("ts") for m in messages)
+                        cur.execute("""
+                            INSERT OR REPLACE INTO sync_state
+                            (channel_id, last_sync_ts, last_sync_cursor, updated_at)
+                            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                        """, (ch_id, oldest_ts, cursor))
+                        self.db.conn.commit()
+                    
+                    cursor = self._get_next_cursor()
+                    if not cursor:
+                        # Mark channel as fully synced if we've reached the end
+                        cur.execute("""
+                            UPDATE sync_state
+                            SET is_fully_synced = 1, updated_at = CURRENT_TIMESTAMP
+                            WHERE channel_id = ?
+                        """, (ch_id,))
+                        self.db.conn.commit()
+                        break
+                        
+                    time.sleep(self.slack.config.rate_limit)
+                
                 channels_processed += 1
                 
-                self._update_sync_progress(sync_run_id, channels_processed, messages_processed)
-                time.sleep(self.slack.config.rate_limit)
+                # Update sync run progress
+                cur.execute("""
+                    UPDATE sync_runs
+                    SET channels_processed = ?, messages_processed = ?
+                    WHERE id = ?
+                """, (channels_processed, messages_processed, sync_run_id))
+                self.db.conn.commit()
                 
-            self._complete_sync_run(sync_run_id, channels_processed, messages_processed)
+                time.sleep(self.slack.config.rate_limit)
+            
+            # Mark sync run as complete
+            cur.execute("""
+                UPDATE sync_runs
+                SET status = 'completed',
+                    finished_at = CURRENT_TIMESTAMP,
+                    channels_processed = ?,
+                    messages_processed = ?
+                WHERE id = ?
+            """, (channels_processed, messages_processed, sync_run_id))
+            self.db.conn.commit()
+            
             return channels_processed, messages_processed
             
         except Exception as e:
-            self._fail_sync_run(sync_run_id, str(e))
+            # Log error and mark sync run as failed
+            logging.error(f"Sync failed: {str(e)}")
+            cur.execute("""
+                UPDATE sync_runs
+                SET status = 'failed',
+                    error = ?,
+                    finished_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (str(e), sync_run_id))
+            self.db.conn.commit()
             raise
             
     def _get_channels_to_sync(self) -> List[Tuple]:
@@ -431,6 +512,84 @@ class MessageManager:
             ORDER BY s.last_sync_ts ASC NULLS FIRST
         """)
         return cur.fetchall()
+        
+    def _fetch_channel_messages(self, channel_id: str, cursor: Optional[str] = None) -> List[Dict]:
+        """Fetch a page of messages from a channel."""
+        url = f"https://{self.slack.config.subdomain}.slack.com/api/conversations.history"
+        params = {
+            "token": self.slack.token,
+            "channel": channel_id,
+            "limit": 200,
+        }
+        if cursor:
+            params["cursor"] = cursor
+            
+        if self.slack.config.verbose:
+            logging.debug(f"GET {url}  cursor={cursor}")
+            
+        r = self.slack.session.get(url, params=params)
+        r.raise_for_status()
+        self._last_response = r.json()
+        return self._last_response.get("messages", [])
+        
+    def _process_messages(self, channel_id: str, messages: List[Dict]) -> int:
+        """Process and store a list of messages."""
+        messages_processed = 0
+        cur = self.db.conn.cursor()
+        
+        # Start transaction for bulk insert
+        self.db.conn.execute("BEGIN TRANSACTION")
+        
+        try:
+            for msg in messages:
+                ts = msg.get("ts")
+                if not ts:
+                    continue
+                    
+                raw = json.dumps(msg, separators=(",", ":"))
+                
+                # Store message data
+                cur.execute("""
+                    INSERT OR REPLACE INTO messages
+                    (channel_id, ts, thread_ts, user_id, subtype, client_msg_id,
+                     edited_ts, edited_user, reply_count, reply_users_count,
+                     latest_reply, is_locked, has_files, has_blocks, raw_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    channel_id,
+                    ts,
+                    msg.get("thread_ts"),
+                    msg.get("user"),
+                    msg.get("subtype"),
+                    msg.get("client_msg_id"),
+                    msg.get("edited", {}).get("ts"),
+                    msg.get("edited", {}).get("user"),
+                    msg.get("reply_count"),
+                    msg.get("reply_users_count"),
+                    msg.get("latest_reply"),
+                    bool(msg.get("is_locked")),
+                    bool(msg.get("files")),
+                    bool(msg.get("blocks")),
+                    None  # raw_json will be stored in compressed_data
+                ))
+                
+                self.db.store_compressed_data('messages', f"{channel_id}_{ts}", raw)
+                messages_processed += 1
+                
+            self.db.conn.commit()
+            
+        except Exception as e:
+            self.db.conn.rollback()
+            logging.error(f"Error processing messages: {str(e)}")
+            raise
+            
+        return messages_processed
+        
+    def _get_next_cursor(self) -> Optional[str]:
+        """Get the next cursor from the response."""
+        if not hasattr(self, '_last_response'):
+            return None
+        return self._last_response.get("response_metadata", {}).get("next_cursor")
 
 class UserManager:
     """Manages user-related operations."""
@@ -459,16 +618,119 @@ class UserManager:
                     break
                     
                 time.sleep(self.slack.config.rate_limit)
+                retry_count = 0  # Reset retry count on success
                 
             except (requests.RequestException, json.JSONDecodeError) as e:
                 retry_count += 1
                 if retry_count >= max_retries:
+                    logging.error(f"Failed to fetch users after {max_retries} retries: {str(e)}")
                     raise
                     
                 logging.warning(f"Error fetching users (attempt {retry_count}/{max_retries}): {str(e)}")
-                time.sleep(self.slack.config.rate_limit * 2)
+                time.sleep(self.slack.config.rate_limit * 2)  # Exponential backoff
                 
+        if self.slack.config.verbose:
+            logging.info(f"Processed {users_processed} users")
+            
         return users_processed
+        
+    def _fetch_user_page(self, marker: Optional[str] = None) -> List[Dict]:
+        """Fetch a single page of users from Slack."""
+        url = f"https://edgeapi.slack.com/cache/{self.slack.config.org_id}/users/list"
+        params = {
+            "_x_app_name": "client",
+            "fp": "c7",
+            "_x_num_retries": "0"
+        }
+        
+        data = {
+            "token": self.slack.token,
+            "count": 1000,
+            "present_first": True,
+            "enterprise_token": self.slack.token
+        }
+        
+        if marker:
+            data["marker"] = marker
+            
+        headers = {
+            "accept": "*/*",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "no-cache",
+            "content-type": "text/plain;charset=UTF-8",
+            "origin": "https://app.slack.com",
+            "pragma": "no-cache",
+            "priority": "u=1, i",
+            "sec-ch-ua": '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-site"
+        }
+        
+        if self.slack.config.verbose:
+            logging.debug(f"POST {url}  marker={marker}")
+            
+        r = self.slack.session.post(url, params=params, headers=headers, json=data)
+        r.raise_for_status()
+        self._last_response = r.json()  # Store the response for pagination
+        return self._last_response.get("results", [])
+        
+    def _process_users(self, users: List[Dict]) -> int:
+        """Process and store a list of users."""
+        users_processed = 0
+        cur = self.db.conn.cursor()
+        
+        # Start transaction for bulk insert
+        self.db.conn.execute("BEGIN TRANSACTION")
+        
+        try:
+            for user in users:
+                user_id = user.get("id")
+                if not user_id:
+                    continue
+                    
+                # Validate required fields
+                name = user.get("name", "").strip()
+                real_name = user.get("real_name", "").strip()
+                display_name = user.get("profile", {}).get("display_name", "").strip()
+                
+                if not any([name, real_name, display_name]):
+                    logging.warning(f"Skipping user {user_id} - no valid name found")
+                    continue
+                    
+                # Store user data
+                raw = json.dumps(user, separators=(",", ":"))
+                cur.execute("""
+                    INSERT OR REPLACE INTO users 
+                    (id, name, real_name, display_name, raw_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    user_id,
+                    name,
+                    real_name,
+                    display_name,
+                    None  # raw_json will be stored in compressed_data
+                ))
+                
+                self.db.store_compressed_data('users', user_id, raw)
+                users_processed += 1
+                
+            self.db.conn.commit()
+            
+        except Exception as e:
+            self.db.conn.rollback()
+            logging.error(f"Error processing users: {str(e)}")
+            raise
+            
+        return users_processed
+        
+    def _get_next_marker(self) -> Optional[str]:
+        """Get the next marker from the response."""
+        if not hasattr(self, '_last_response'):
+            return None
+        return self._last_response.get("next_marker")
 
 class Exporter:
     """Handles data export operations."""
