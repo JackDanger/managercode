@@ -32,6 +32,8 @@ class SlackConfig:
 class DatabaseManager:
     """Manages database operations and compression."""
     
+    CURRENT_VERSION = 2  # Increment this when schema changes
+    
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
         self.conn = None
@@ -40,6 +42,7 @@ class DatabaseManager:
         """Establish database connection and setup schema."""
         self.conn = sqlite3.connect(self.db_path)
         self._setup_schema()
+        self._check_and_migrate()
         
     def close(self) -> None:
         """Close database connection."""
@@ -50,7 +53,15 @@ class DatabaseManager:
         """Create database tables if they don't exist."""
         cur = self.conn.cursor()
         
-        # Create all tables
+        # Create version tracking table first
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS db_version (
+                version INTEGER PRIMARY KEY,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
+        # Create all other tables
         tables = [
             self._get_sync_state_schema(),
             self._get_channels_schema(),
@@ -64,6 +75,66 @@ class DatabaseManager:
             cur.execute(schema)
             
         self.conn.commit()
+        
+    def _check_and_migrate(self) -> None:
+        """Check database version and run migrations if needed."""
+        cur = self.conn.cursor()
+        
+        # Get current version
+        cur.execute("SELECT version FROM db_version ORDER BY version DESC LIMIT 1")
+        row = cur.fetchone()
+        current_version = row[0] if row else 0
+        
+        if current_version < self.CURRENT_VERSION:
+            self._run_migrations(current_version)
+            
+    def _run_migrations(self, from_version: int) -> None:
+        """Run all necessary migrations."""
+        if from_version < 2:
+            self._migrate_to_v2()
+            
+        # Update version
+        cur = self.conn.cursor()
+        cur.execute("INSERT INTO db_version (version) VALUES (?)", (self.CURRENT_VERSION,))
+        self.conn.commit()
+        
+    def _migrate_to_v2(self) -> None:
+        """Migrate from version 1 to version 2 (compressed data)."""
+        logging.info("Starting migration to version 2 (compressed data)...")
+        
+        # Create compressed_data table if it doesn't exist
+        cur = self.conn.cursor()
+        cur.execute(self._get_compressed_data_schema())
+        
+        # Migrate channels
+        logging.info("Migrating channels...")
+        cur.execute("SELECT id, raw_json FROM channels WHERE raw_json IS NOT NULL")
+        for ch_id, raw_json in cur.fetchall():
+            if raw_json:
+                self.store_compressed_data('channels', ch_id, raw_json)
+                cur.execute("UPDATE channels SET raw_json = NULL WHERE id = ?", (ch_id,))
+        
+        # Migrate messages
+        logging.info("Migrating messages...")
+        cur.execute("SELECT channel_id, ts, raw_json FROM messages WHERE raw_json IS NOT NULL")
+        for ch_id, ts, raw_json in cur.fetchall():
+            if raw_json:
+                self.store_compressed_data('messages', f"{ch_id}_{ts}", raw_json)
+                cur.execute(
+                    "UPDATE messages SET raw_json = NULL WHERE channel_id = ? AND ts = ?",
+                    (ch_id, ts)
+                )
+        
+        # Migrate users
+        logging.info("Migrating users...")
+        cur.execute("SELECT id, raw_json FROM users WHERE raw_json IS NOT NULL")
+        for user_id, raw_json in cur.fetchall():
+            if raw_json:
+                self.store_compressed_data('users', user_id, raw_json)
+                cur.execute("UPDATE users SET raw_json = NULL WHERE id = ?", (user_id,))
+        
+        self.conn.commit()
+        logging.info("Migration to version 2 completed successfully")
         
     def _get_sync_state_schema(self) -> str:
         return """
@@ -182,6 +253,8 @@ class DatabaseManager:
     def get_compressed_data(self, table_name: str, record_id: str) -> Optional[str]:
         """Retrieve and decompress data from the compressed_data table."""
         cur = self.conn.cursor()
+        
+        # First try compressed data
         cur.execute("""
             SELECT compressed_data 
             FROM compressed_data 
@@ -191,6 +264,22 @@ class DatabaseManager:
         row = cur.fetchone()
         if row:
             return self.decompress_data(row[0])
+            
+        # If not found in compressed_data, try raw_json (for backward compatibility)
+        if table_name == 'channels':
+            cur.execute("SELECT raw_json FROM channels WHERE id = ?", (record_id,))
+        elif table_name == 'messages':
+            ch_id, ts = record_id.split('_')
+            cur.execute("SELECT raw_json FROM messages WHERE channel_id = ? AND ts = ?", (ch_id, ts))
+        elif table_name == 'users':
+            cur.execute("SELECT raw_json FROM users WHERE id = ?", (record_id,))
+            
+        row = cur.fetchone()
+        if row and row[0]:
+            # If found in raw_json, migrate it to compressed_data
+            self.store_compressed_data(table_name, record_id, row[0])
+            return row[0]
+            
         return None
 
 class SlackClient:
@@ -410,6 +499,81 @@ class Exporter:
                 continue
                 
         self._write_metadata_files(output_dir, total_conversations, channels, channel_files)
+
+def parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Archive Slack channels via in-browser endpoints")
+    
+    # Create a mutually exclusive group for the two modes
+    mode_group = parser.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
+        "subdomain", nargs="?", help="Slack workspace subdomain (e.g. datavant.enterprise)"
+    )
+    mode_group.add_argument(
+        "--dump-axolotl",
+        help="Export database contents for Axolotl fine-tuning to the specified directory"
+    )
+    
+    # Add all other arguments as optional
+    parser.add_argument(
+        "--org", help="Which specific Slack org the cookie is signed into"
+    )
+    parser.add_argument(
+        "--x-version-timestamp",
+        help="X-Version-Timestamp from the Slack homepage"
+    )
+    parser.add_argument(
+        "--team", help="Which specific Slack team the cookie is signed into"
+    )
+    parser.add_argument(
+        "--cookie", help="Your full Slack session cookie string"
+    )
+    parser.add_argument(
+        "--rate-limit",
+        type=float,
+        default=1.0,
+        help="Seconds to wait between HTTP requests",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--client-req-id",
+        help="Client request ID for API calls"
+    )
+    parser.add_argument(
+        "--browse-session-id",
+        help="Browse session ID for API calls"
+    )
+    
+    args = parser.parse_args()
+    
+    # For archive mode, validate required arguments
+    if not args.dump_axolotl and not all([args.subdomain, args.org, args.x_version_timestamp, args.team, args.cookie]):
+        parser.error("When archiving (not using --dump-axolotl), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie")
+    
+    return args
+
+def create_slack_config(args: argparse.Namespace) -> SlackConfig:
+    """Create SlackConfig from command line arguments."""
+    return SlackConfig(
+        subdomain=args.subdomain,
+        org_id=args.org,
+        team_id=args.team,
+        x_version_timestamp=args.x_version_timestamp,
+        cookie=args.cookie,
+        rate_limit=args.rate_limit,
+        verbose=args.verbose,
+        client_req_id=args.client_req_id,
+        browse_session_id=args.browse_session_id
+    )
+
+def setup_logging(verbose: bool) -> None:
+    """Configure logging based on verbosity level."""
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
 
 def main():
     """Main entry point."""
