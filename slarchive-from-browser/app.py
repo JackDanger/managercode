@@ -838,13 +838,15 @@ class MessageManager:
                         try:
                             # Use both timestamps for sync state
                             if latest_ts and oldest_ts:
+                                # Get next cursor before updating sync state
+                                next_cursor = j.get("response_metadata", {}).get("next_cursor")
                                 sync_cur.execute(
                                     """
                                     INSERT OR REPLACE INTO sync_state
                                     (channel_id, last_sync_ts, last_sync_cursor, updated_at)
                                     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                                 """,
-                                    (ch_id, str(latest_ts), cursor),
+                                    (ch_id, str(latest_ts), next_cursor),  # Store next_cursor, not current cursor
                                 )
                                 self.db.conn.commit()
                         except Exception as e:
