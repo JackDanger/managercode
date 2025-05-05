@@ -82,7 +82,6 @@ class DatabaseManager:
             self._get_channels_schema(),
             self._get_messages_schema(),
             self._get_users_schema(),
-            self._get_sync_runs_schema(),
             self._get_compressed_data_schema(),
         ]
 
@@ -96,7 +95,7 @@ class DatabaseManager:
         CREATE TABLE IF NOT EXISTS channels (
             id TEXT PRIMARY KEY,
             name TEXT,
-            oldest_ts_synced REAL,
+            ever_fully_synced BOOLEAN DEFAULT FALSE,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
@@ -132,19 +131,6 @@ class DatabaseManager:
             real_name TEXT,
             display_name TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-
-    def _get_sync_runs_schema(self) -> str:
-        return """
-        CREATE TABLE IF NOT EXISTS sync_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            finished_at TIMESTAMP,
-            status TEXT,
-            error TEXT,
-            channels_processed INTEGER DEFAULT 0,
-            messages_processed INTEGER DEFAULT 0
         );
         """
 
@@ -299,7 +285,7 @@ class ChannelManager:
     def __init__(self, db: DatabaseManager, slack: SlackClient):
         self.db = db
         self.slack = slack
-    
+
     def list_all_channels(self) -> List[Dict]:
         """List all channels from Slack."""
         cur = self.db.conn.cursor()
@@ -310,51 +296,60 @@ class ChannelManager:
         """Fetch all channels from Slack."""
         cur = self.db.conn.cursor()
         page = 1
-        per_page = 50
+        per_page = 100
         channels_processed = 0
 
-        print("\nFetching channels...")
+        channel_types = [
+            "external_shared",
+            "exclude_archived",
+            "private_exclude",
+            "archived",
+        ]
+        items = []
 
-        while True:
-            channels = self._fetch_channel_page(page, per_page)
-            if not channels:
-                break
+        for channel_type in channel_types:
+            print(f"\nFetching channels for {channel_type}...")
 
-            if self.slack.config.verbose:
-                logging.debug(f"Got {len(channels)} channels on page {page}")
-            else:
-                print(f"Page {page}: {len(channels)} channels")
+            while True:
+                channels = self._fetch_channel_page(page, per_page, channel_type)
+                if not channels:
+                    break
 
-            # Process channels
-            for ch in channels:
-                ch_id = ch.get("id") or ch.get("channel", {}).get("id")
-                ch_name = ch.get("name") or ch.get("channel", {}).get("name")
+                if self.slack.config.verbose:
+                    logging.debug(f"Got {len(channels)} channels on page {page}")
+                else:
+                    print(f"Page {page}: {len(channels)} channels")
 
-                # Update channel info and reset sync state if needed
-                cur.execute(
-                    """
-                    INSERT OR REPLACE INTO channels (id, name, oldest_ts_synced, updated_at)
-                    VALUES (?, ?, NULL, CURRENT_TIMESTAMP)
-                """,
-                    (ch_id, ch_name),
-                )
+                # Process channels
+                for ch in channels:
+                    ch_id = ch.get("id") or ch.get("channel", {}).get("id")
+                    ch_name = ch.get("name") or ch.get("channel", {}).get("name")
 
-                channels_processed += 1
+                    # Update channel info and reset sync state if needed
+                    cur.execute(
+                        """
+                        INSERT OR REPLACE INTO channels (id, name, updated_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                    """,
+                        (ch_id, ch_name),
+                    )
 
-            self.db.conn.commit()
+                    channels_processed += 1
 
-            if len(channels) < per_page:
-                break
+                self.db.conn.commit()
 
-            page += 1
-            if self.slack.config.verbose:
-                print(f"Sleeping for {self.slack.config.rate_limit} seconds")
-            time.sleep(self.slack.config.rate_limit)
+                if len(channels) < per_page:
+                    break
+
+                page += 1
+                if self.slack.config.verbose:
+                    print(f"Sleeping for {self.slack.config.rate_limit} seconds")
+                time.sleep(self.slack.config.rate_limit)
 
         print(f"\nFound {channels_processed} channels")
         return channels_processed
 
-    def _fetch_channel_page(self, page: int, per_page: int) -> List[Dict]:
+    def _fetch_channel_page(self, page: int, per_page: int, channel_type: str) -> List[Dict]:
         """Fetch a single page of channels from Slack."""
         url = f"https://{self.slack.config.subdomain}.slack.com/api/search.modules.channels"
 
@@ -419,7 +414,9 @@ class ChannelManager:
         form_data.append("0")
 
         form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="extra_message_data"')
+        form_data.append(
+            'Content-Disposition: form-data; name="extra_message_data"'
+        )
         form_data.append("")
         form_data.append("0")
 
@@ -446,7 +443,9 @@ class ChannelManager:
         form_data.append("false")
 
         form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="include_files_shares"')
+        form_data.append(
+            'Content-Disposition: form-data; name="include_files_shares"'
+        )
         form_data.append("")
         form_data.append("1")
 
@@ -480,10 +479,12 @@ class ChannelManager:
         form_data.append(f"--{boundary}")
         form_data.append('Content-Disposition: form-data; name="channel_type"')
         form_data.append("")
-        form_data.append("exclude_archived")
+        form_data.append(channel_type)
 
         form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="exclude_my_channels"')
+        form_data.append(
+            'Content-Disposition: form-data; name="exclude_my_channels"'
+        )
         form_data.append("")
         form_data.append("0")
 
@@ -630,10 +631,13 @@ class MessageProcessor:
             ),
         )
 
+
 class MessageManager:
     """Manages message-related operations."""
 
-    def __init__(self, db: DatabaseManager, channel_manager: ChannelManager, slack: SlackClient):
+    def __init__(
+        self, db: DatabaseManager, channel_manager: ChannelManager, slack: SlackClient
+    ):
         self.db = db
         self.slack = slack
         self.channel_manager = channel_manager
@@ -658,7 +662,9 @@ class MessageManager:
                     channels_processed += 1
                 messages_processed += channel_msgs
 
-            print(f"\nSync complete: {messages_processed} messages from {channels_processed} channels")
+            print(
+                f"\nSync complete: {messages_processed} messages from {channels_processed} channels"
+            )
             return channels_processed, messages_processed
 
         except Exception as e:
@@ -666,71 +672,98 @@ class MessageManager:
             raise
 
     def sync_channel(self, channel_id: str, channel_name: str) -> Tuple[int, bool]:
-        """Sync a single channel completely before moving to the next."""
+        """
+        If the channel has never been fully synced, read pages of messages until
+        we reach the first ever posted in the channel and set ever_fully_synced to true.
+        If we get interrupted along the way, continue from the oldest (lowest) ts in the channel history.
+        If the channel has ever been fully synced, we'll read from the newest
+        and stop when we encounter an existing timestamp.
+        """
+
+        # Get the newest timestamp we've seen for this channel
+        cur = self.db.conn.cursor()
+        cur.execute("SELECT max(ts) FROM messages WHERE channel_id = ?", (channel_id,))
+        row = cur.fetchone()
+        latest_synced_ts = row[0] if row and row[0] is not None else None
+
         # Get the oldest timestamp we've seen for this channel
         cur = self.db.conn.cursor()
-        cur.execute("SELECT oldest_ts_synced FROM channels WHERE id = ?", (channel_id,))
+        cur.execute("SELECT min(ts) FROM messages WHERE channel_id = ?", (channel_id,))
         row = cur.fetchone()
-        oldest_ts_synced = row[0] if row and row[0] is not None else None
+        oldest_synced_ts = row[0] if row and row[0] is not None else None
 
-        print(f"\nSyncing #{channel_name}...")
-        
         messages_processed = 0
         batch_size = 0
-        latest_cursor = None
         has_more = True
+        batch_oldest_ts = None
+
+        cur.execute("SELECT ever_fully_synced FROM channels WHERE id = ?", (channel_id,))
+        row = cur.fetchone()
+        ever_fully_synced = row[0] if row and row[0] is not None else False
+
+        if ever_fully_synced:
+            latest_ts = None
+        else:
+            latest_ts = oldest_synced_ts
 
         while has_more:
             # Fetch messages, starting from latest_cursor or beginning
-            messages, has_more, new_cursor = self._fetch_messages(channel_id, latest_cursor)
-            
+            messages, has_more, latest_ts = self._fetch_messages(
+                channel_id, latest_ts
+            )
+
             # If we got no messages, we're done with this channel
-            if not messages:
-                print(f"#{channel_name}: No messages found")
-                break
-                
+            fully_synced = not has_more
+
+
             # Check if we've reached previously synced messages
-            if oldest_ts_synced is not None:
+            if latest_synced_ts is not None:
                 # Find first message with timestamp <= oldest_ts_synced
                 for i, msg in enumerate(messages):
-                    if float(msg.get('ts', 0)) <= oldest_ts_synced:
+                    if float(msg.get("ts", 0)) <= float(latest_synced_ts):
                         # We've reached previously synced messages, only process newer ones
                         messages = messages[:i]
                         has_more = False  # Stop fetching more
                         break
-            
+
             # Process this batch of messages
             if messages:
-                batch_size, latest_ts, batch_oldest_ts = self.message_processor.process_messages(channel_id, messages)
+                batch_size, latest_ts, batch_oldest_ts = (
+                    self.message_processor.process_messages(channel_id, messages)
+                )
                 messages_processed += batch_size
+
                 
-                # Update channel's oldest_ts_synced if this is the oldest batch we've seen
-                if batch_oldest_ts is not None:
-                    if oldest_ts_synced is None or batch_oldest_ts < oldest_ts_synced:
-                        cur.execute(
-                            "UPDATE channels SET oldest_ts_synced = ? WHERE id = ?",
-                            (batch_oldest_ts, channel_id)
-                        )
-                        oldest_ts_synced = batch_oldest_ts
-                        self.db.conn.commit()
-                
-                print(f"#{channel_name}: Processed {batch_size} messages (total: {messages_processed})")
-            
+                oldest_readable = datetime.fromtimestamp(batch_oldest_ts).strftime('%Y-%m-%d %H:%M:%S')
+                latest_readable = datetime.fromtimestamp(latest_ts).strftime('%Y-%m-%d %H:%M:%S')
+                print(
+                    f"#{channel_name}: Processed {batch_size} messages (total: {messages_processed}) - {oldest_readable} to {latest_readable}"
+                )
+
+            if fully_synced:
+                self.db.conn.execute("UPDATE channels SET ever_fully_synced = ? WHERE id = ?", (fully_synced, channel_id))
+                self.db.conn.commit()
+                print(f"#{channel_name} fully synced")
+
             # Update cursor for next batch
-            latest_cursor = new_cursor
-            
+            latest_ts = batch_oldest_ts
+
             # Sleep to respect rate limits
             time.sleep(self.slack.config.rate_limit)
-        
+
         return messages_processed, messages_processed > 0
 
-    def _fetch_messages(self, channel_id: str, cursor: Optional[str]) -> Tuple[List[Dict], bool, Optional[str]]:
+    def _fetch_messages(
+        self, channel_id: str, latest_ts: Optional[str]
+    ) -> Tuple[List[Dict], bool, Optional[str]]:
         """Fetch a batch of messages from a channel.
-        
+
         Returns:
             Tuple of (messages, has_more, next_cursor)
         """
-        url = f"https://{self.slack.config.subdomain}.slack.com/api/conversations.history"
+        url = (
+            f"https://{self.slack.config.subdomain}.slack.com/api/conversations.history"
+        )
 
         # Create multipart form data
         boundary = "----WebKitFormBoundaryU4wEmw2oBAuXS3g9"
@@ -772,12 +805,12 @@ class MessageManager:
         form_data.append("")
         form_data.append("200")
 
-        # Add cursor parameter if we have one
-        if cursor is not None:
+        # Add latest parameter if we have one
+        if latest_ts is not None:
             form_data.append(f"--{boundary}")
-            form_data.append('Content-Disposition: form-data; name="cursor"')
+            form_data.append('Content-Disposition: form-data; name="latest"')
             form_data.append("")
-            form_data.append(str(cursor))
+            form_data.append(str(latest_ts))
 
         form_data.append(f"--{boundary}")
         form_data.append('Content-Disposition: form-data; name="_x_reason"')
@@ -816,7 +849,7 @@ class MessageManager:
         }
 
         if self.slack.config.verbose:
-            logging.debug(f"POST {url}  cursor={cursor}")
+            logging.debug(f"POST {url}  latest_ts={latest_ts}")
             self.slack._print_curl_command(
                 "POST", url, headers, data=data, params=params
             )
@@ -825,12 +858,15 @@ class MessageManager:
             r = self.slack.session.post(url, headers=headers, data=data, params=params)
             r.raise_for_status()
             j = r.json()
-            
+
             messages = j.get("messages", [])
             has_more = j.get("has_more", False)
-            next_cursor = j.get("response_metadata", {}).get("next_cursor")
-            
-            return messages, has_more, next_cursor
+            if messages:
+                next_latest = min([float(m.get("ts", 0)) for m in messages])
+            else:
+                next_latest = None
+
+            return messages, has_more, next_latest
 
         except Exception as e:
             logging.error(f"Error fetching messages for channel {channel_id}: {e}")
@@ -984,7 +1020,7 @@ class Exporter:
 
     MAX_CONTEXT_MESSAGES = 10  # Maximum number of messages to include in context
     MAX_TOKENS_PER_CONVERSATION = 2048  # Approximate max tokens per conversation
-    
+
     def __init__(self, db: DatabaseManager):
         self.db = db
 
@@ -1021,10 +1057,12 @@ class Exporter:
         # Very rough approximation: 4 characters per token
         return len(text) // 4
 
-    def _format_message(self, msg: Dict, user_name: str, include_reactions: bool = True) -> str:
+    def _format_message(
+        self, msg: Dict, user_name: str, include_reactions: bool = True
+    ) -> str:
         """Format a single message with user and content."""
         text = msg.get("text", "").strip()
-        
+
         # Add any file information
         files = msg.get("files", [])
         if files:
@@ -1044,11 +1082,15 @@ class Exporter:
 
         # Format edited information
         if msg.get("edited"):
-            text += f"\n[edited by {self.db.get_user_display_name(msg['edited']['user'])}]"
+            text += (
+                f"\n[edited by {self.db.get_user_display_name(msg['edited']['user'])}]"
+            )
 
         return f"{user_name}: {text}"
 
-    def _process_channel_conversations(self, channel_id: str, channel_name: str) -> List[Dict]:
+    def _process_channel_conversations(
+        self, channel_id: str, channel_name: str
+    ) -> List[Dict]:
         """Process channel messages into coherent conversation chunks for fine-tuning."""
         cur = self.db.conn.cursor()
         cur.execute(
@@ -1060,20 +1102,20 @@ class Exporter:
         """,
             (channel_id,),
         )
-        
+
         conversations = []
         current_conversation = {
             "channel": channel_name,
             "messages": [],
-            "token_count": 0
+            "token_count": 0,
         }
-        
+
         last_ts = None
-        time_gap_threshold = 3600 * 24 # 1 day in seconds
+        time_gap_threshold = 3600 * 24  # 1 day in seconds
 
         for msg_row in cur.fetchall():
             ts, user_id, thread_ts, subtype = msg_row
-            
+
             # Skip system messages
             if subtype in ["channel_join", "channel_leave", "bot_message"]:
                 continue
@@ -1085,7 +1127,7 @@ class Exporter:
 
             msg_data = json.loads(raw_data)
             user_name = self.db.get_user_display_name(user_id)
-            
+
             # Format the message
             formatted_msg = self._format_message(msg_data, user_name)
             msg_tokens = self._estimate_tokens(formatted_msg)
@@ -1094,14 +1136,16 @@ class Exporter:
             if not thread_ts and msg_data.get("reply_count", 0) > 0:
                 # Get thread messages
                 thread_msgs = self._get_thread_messages(channel_id, ts)
-                thread_text = "\n".join([
-                    self._format_message(
-                        tm, 
-                        self.db.get_user_display_name(tm.get("user")),
-                        include_reactions=False
-                    )
-                    for tm in thread_msgs
-                ])
+                thread_text = "\n".join(
+                    [
+                        self._format_message(
+                            tm,
+                            self.db.get_user_display_name(tm.get("user")),
+                            include_reactions=False,
+                        )
+                        for tm in thread_msgs
+                    ]
+                )
                 formatted_msg += f"\n[Thread responses:\n{thread_text}\n]"
                 msg_tokens = self._estimate_tokens(formatted_msg)
 
@@ -1109,24 +1153,25 @@ class Exporter:
             # 1. Adding this message would exceed token limit
             # 2. Time gap is too large
             # 3. Current conversation already has max messages
-            if (current_conversation["token_count"] + msg_tokens > self.MAX_TOKENS_PER_CONVERSATION or
-                (last_ts and float(ts) - float(last_ts) > time_gap_threshold) or
-                len(current_conversation["messages"]) >= self.MAX_CONTEXT_MESSAGES):
-                
+            if (
+                current_conversation["token_count"] + msg_tokens
+                > self.MAX_TOKENS_PER_CONVERSATION
+                or (last_ts and float(ts) - float(last_ts) > time_gap_threshold)
+                or len(current_conversation["messages"]) >= self.MAX_CONTEXT_MESSAGES
+            ):
+
                 if current_conversation["messages"]:
                     conversations.append(current_conversation)
                 current_conversation = {
                     "channel": channel_name,
                     "messages": [],
-                    "token_count": 0
+                    "token_count": 0,
                 }
 
             # Add message to current conversation
-            current_conversation["messages"].append({
-                "timestamp": ts,
-                "user": user_name,
-                "content": formatted_msg
-            })
+            current_conversation["messages"].append(
+                {"timestamp": ts, "user": user_name, "content": formatted_msg}
+            )
             current_conversation["token_count"] += msg_tokens
             last_ts = ts
 
@@ -1136,7 +1181,13 @@ class Exporter:
 
         return conversations
 
-    def _write_channel_file(self, channel_id: str, channel_name: str, conversations: List[Dict], output_dir: str) -> str:
+    def _write_channel_file(
+        self,
+        channel_id: str,
+        channel_name: str,
+        conversations: List[Dict],
+        output_dir: str,
+    ) -> str:
         """Write channel conversations to a file in a format suitable for fine-tuning."""
         output_path = os.path.join(output_dir, f"{channel_name}.jsonl")
         with open(output_path, "w", encoding="utf-8") as f:
@@ -1146,22 +1197,29 @@ class Exporter:
                     "conversations": [
                         {
                             "role": "system",
-                            "content": "You are a helpful AI assistant that understands Slack conversations and can answer questions about them."
+                            "content": "You are a helpful AI assistant that understands Slack conversations and can answer questions about them.",
                         },
                         {
                             "role": "user",
-                            "content": f"Channel: #{conv['channel']}\n\n" + "\n".join(msg["content"] for msg in conv["messages"])
+                            "content": f"Channel: #{conv['channel']}\n\n"
+                            + "\n".join(msg["content"] for msg in conv["messages"]),
                         },
                         {
                             "role": "assistant",
-                            "content": "I understand the conversation and can answer questions about its content, participants, and key points discussed."
-                        }
+                            "content": "I understand the conversation and can answer questions about its content, participants, and key points discussed.",
+                        },
                     ]
                 }
                 f.write(json.dumps(formatted_conv, ensure_ascii=False) + "\n")
         return output_path
 
-    def _write_metadata_files(self, output_dir: str, total_conversations: int, channels: List[Tuple[str, str]], channel_files: List[Dict]) -> None:
+    def _write_metadata_files(
+        self,
+        output_dir: str,
+        total_conversations: int,
+        channels: List[Tuple[str, str]],
+        channel_files: List[Dict],
+    ) -> None:
         """Write metadata files for the export."""
         summary = {
             "total_conversations": total_conversations,
@@ -1179,9 +1237,9 @@ class Exporter:
                     "Threads are included with their parent messages",
                     "System messages are filtered out",
                     "Reactions and edits are preserved as contextual information",
-                    "File shares are noted but content is not included"
-                ]
-            }
+                    "File shares are noted but content is not included",
+                ],
+            },
         }
 
         with open(os.path.join(output_dir, "summary.json"), "w", encoding="utf-8") as f:
@@ -1240,17 +1298,23 @@ See summary.json for detailed statistics and channel information.
         for channel_id, channel_name in channels:
             try:
                 print(f"Processing channel #{channel_name}...")
-                conversations = self._process_channel_conversations(channel_id, channel_name)
+                conversations = self._process_channel_conversations(
+                    channel_id, channel_name
+                )
                 if not conversations:
                     print(f"  No conversations found in #{channel_name}")
                     continue
 
-                output_path = self._write_channel_file(channel_id, channel_name, conversations, output_dir)
-                channel_files.append({
-                    "path": output_path,
-                    "type": "conversation",
-                    "conversation_count": len(conversations)
-                })
+                output_path = self._write_channel_file(
+                    channel_id, channel_name, conversations, output_dir
+                )
+                channel_files.append(
+                    {
+                        "path": output_path,
+                        "type": "conversation",
+                        "conversation_count": len(conversations),
+                    }
+                )
                 total_conversations += len(conversations)
                 print(f"  Exported {len(conversations)} conversations")
 
@@ -1258,8 +1322,12 @@ See summary.json for detailed statistics and channel information.
                 logging.error(f"Error processing channel {channel_name}: {str(e)}")
                 continue
 
-        self._write_metadata_files(output_dir, total_conversations, channels, channel_files)
-        print(f"\nExport complete: {total_conversations:,} conversations from {len(channels)} channels")
+        self._write_metadata_files(
+            output_dir, total_conversations, channels, channel_files
+        )
+        print(
+            f"\nExport complete: {total_conversations:,} conversations from {len(channels)} channels"
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -1361,58 +1429,22 @@ def main():
         channel_manager = ChannelManager(db, slack)
         message_manager = MessageManager(db, channel_manager, slack)
 
-        # Start syncing - add sync_run tracking
-        cur = db.conn.cursor()
-        cur.execute("INSERT INTO sync_runs (status) VALUES ('running')")
-        sync_run_id = cur.lastrowid
-        db.conn.commit()
-        
-        try:
-            print("\n=== Starting Slack Archive Sync ===\n")
-            
-            # Step 1: Fetch users
-            user_count = user_manager.fetch_all_users()
-            
-            # Step 2: Fetch channels
-            channel_count = channel_manager.fetch_all_channels()
-            
-            # Step 3: Sync messages from all channels
-            channels_processed, messages_processed = message_manager.sync_all_channels()
-            
-            # Update sync run status
-            cur.execute(
-                """
-                UPDATE sync_runs 
-                SET finished_at = CURRENT_TIMESTAMP, 
-                    status = 'completed',
-                    channels_processed = ?,
-                    messages_processed = ?
-                WHERE id = ?
-            """, 
-                (channels_processed, messages_processed, sync_run_id)
-            )
-            db.conn.commit()
-            
-            print("\n=== Sync Complete ===")
-            print(f"Users: {user_count}")
-            print(f"Channels: {channel_count}")
-            print(f"Messages: {messages_processed}")
-            print(f"Archive stored in {DB_PATH}")
-            
-        except Exception as e:
-            # Mark sync run as failed
-            cur.execute(
-                """
-                UPDATE sync_runs 
-                SET finished_at = CURRENT_TIMESTAMP, 
-                    status = 'failed',
-                    error = ?
-                WHERE id = ?
-            """, 
-                (str(e), sync_run_id)
-            )
-            db.conn.commit()
-            raise
+        print("\n=== Starting Slack Archive Sync ===\n")
+
+        # Step 1: Fetch users
+        user_count = user_manager.fetch_all_users()
+
+        # Step 2: Fetch channels
+        channel_count = channel_manager.fetch_all_channels()
+
+        # Step 3: Sync messages from all channels
+        messages_processed = message_manager.sync_all_channels()
+
+        print("\n=== Sync Complete ===")
+        print(f"Users: {user_count}")
+        print(f"Channels: {channel_count}")
+        print(f"Messages: {messages_processed}")
+        print(f"Archive stored in {DB_PATH}")
 
     finally:
         db.close()
@@ -1420,4 +1452,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-# 
+#
