@@ -706,7 +706,7 @@ class MessageManager:
 
         while has_more:
             # Fetch messages, starting from latest_cursor or beginning
-            messages, has_more, latest_ts = self._fetch_messages(channel_id, latest_ts)
+            messages, has_more, latest_ts, http_timing = self._fetch_messages(channel_id, latest_ts)
 
             # If we got no messages, we're done with this channel
             fully_synced = not has_more
@@ -723,6 +723,7 @@ class MessageManager:
 
             # Process this batch of messages
             if messages:
+                start_time = time.time()
                 batch_size, latest_ts, batch_oldest_ts = (
                     self.message_processor.process_messages(channel_id, messages)
                 )
@@ -733,8 +734,10 @@ class MessageManager:
                 )
                 latest_readable = datetime.fromtimestamp(latest_ts).strftime("%Y-%m-%d")
                 message_count = str(messages_processed).rjust(5)
+                http_timing_str = f"{float(http_timing):.2f}s"
+                db_timing_str = f"{float(start_time - time.time()):.2f}s"
                 print(
-                    f"#{channel_name.ljust(70)}: Processed {batch_size.ljust(3)} messages (total: {message_count}) - {latest_readable} to {oldest_readable}"
+                    f"#{channel_name.ljust(70)}: Processed {batch_size.ljust(3)} messages (total: {message_count}) - {latest_readable} to {oldest_readable} in http:{http_timing_str} db:{db_timing_str}"
                 )
 
             if fully_synced:
@@ -848,14 +851,9 @@ class MessageManager:
             "_x_num_retries": "0",
         }
 
-        if self.slack.config.verbose:
-            logging.debug(f"POST {url}  latest_ts={latest_ts}")
-            self.slack._print_curl_command(
-                "POST", url, headers, data=data, params=params
-            )
-
         try:
             r = self.slack.session.post(url, headers=headers, data=data, params=params)
+            http_timing = r.elapsed.total_seconds()
             r.raise_for_status()
             j = r.json()
 
@@ -866,7 +864,13 @@ class MessageManager:
             else:
                 next_latest = None
 
-            return messages, has_more, next_latest
+            if self.slack.config.verbose:
+                logging.debug(f"POST {url}  latest_ts={latest_ts}")
+                self.slack._print_curl_command(
+                    "POST", url, headers, data=data, params=params
+                )
+
+            return messages, has_more, next_latest, http_timing
 
         except Exception as e:
             logging.error(f"Error fetching messages for channel {channel_id}: {e}")
@@ -931,15 +935,14 @@ class UserManager:
                     url, params=params, headers=headers, json=data
                 )
                 r.raise_for_status()
+                http_timing = r.elapsed.total_seconds()
                 self._last_response = r.json()
 
                 # Process users
                 users = self._last_response.get("results", [])
-                if self.slack.config.verbose:
-                    logging.debug(f"Got {len(users)} users")
-                else:
-                    print(f"Page: {len(users)} users")
+                print(f"Page: {len(users)} users")
 
+                start_time = time.time()
                 # Start transaction for bulk insert
                 self.db.conn.execute("BEGIN TRANSACTION")
 
@@ -979,6 +982,9 @@ class UserManager:
                     users_processed += 1
 
                 self.db.conn.commit()
+                sql_timing = time.time() - start_time
+                if self.slack.config.verbose:
+                    print(f"Timing: http={http_timing}, sql={sql_timing}")
                 retry_count = 0  # Reset retry count on success
 
                 # Check for more pages
