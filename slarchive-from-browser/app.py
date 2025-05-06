@@ -1392,10 +1392,10 @@ def main():
         print("\n=== Starting Slack Archive Sync ===\n")
 
         # Step 1: Fetch users
-        user_count = user_manager.fetch_all_users()
+        #user_count = user_manager.fetch_all_users()
 
         # Step 2: Fetch channels
-        channel_count = channel_manager.fetch_all_channels()
+        #channel_count = channel_manager.fetch_all_channels()
 
         # Step 3: Sync messages from all channels
         messages_processed = message_manager.sync_all_channels()
