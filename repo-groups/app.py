@@ -7,7 +7,10 @@ Usage:
         --group ~/www/some-org-*="Some Org" ~/www/repo1="App 1" ~/www/repo2="Prod App" \
         --group "Infra" ~/www/repo3="Product 4"
 
-This script parses groups of git repositories, computes commit counts and total lines of tracked files in each repo, then uses log(commits)+log(lines) to size each group’s box. Repos are drawn as circles sized by commit count; group boxes have a minimum size and are roughly square.
+This script parses groups of git repositories, computes commit counts and total
+lines of tracked files in each repo, then uses log(commits)+log(lines) to size
+each group's box. Repos are drawn as circles sized by commit count; group boxes
+have a minimum size and are roughly square.
 """
 import sys, os, glob, subprocess
 import matplotlib.pyplot as plt
@@ -55,7 +58,7 @@ def get_commit_count(target_path):
     try:
         os.chdir(target_path)
         proc = subprocess.run(
-            "git log --oneline | wc -l",
+            "git log --oneline . | wc -l",
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -63,33 +66,29 @@ def get_commit_count(target_path):
             check=True,
         )
         return int(proc.stdout.strip())
-    except Exception:
-        return 0
     finally:
         os.chdir(prev)
 
 
-def get_total_lines(repo_path):
+def get_total_lines(target_path):
     """Return total lines across all tracked files in repo_path."""
-    try:
-        res = subprocess.run(
-            ["git", "-C", repo_path, "ls-files"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=True,
-        )
-        total = 0
-        for f in res.stdout.splitlines():
-            p = os.path.join(repo_path, f)
-            try:
-                with open(p, "rb") as fh:
-                    total += sum(1 for _ in fh)
-            except:
-                pass
-        return total
-    except:
-        return 0
+    os.chdir(target_path)
+    res = subprocess.run(
+        ["git", "ls-files", "."],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=True,
+    )
+    total = 0
+    for f in res.stdout.splitlines():
+        p = os.path.join(target_path, f)
+        try:
+            with open(p, "rb") as fh:
+                total += sum(1 for line in fh if line.rstrip(b'\r\n'))
+        except:
+            pass
+    return total
 
 
 def collect_metrics(groups):
@@ -106,28 +105,54 @@ def collect_metrics(groups):
 
 
 def plot(groups, repo_metrics):
-    fig, ax = plt.subplots(figsize=(len(groups)*2, 4))
+    fig, ax = plt.subplots(figsize=(len(groups)*4, 8))
     ax.axis('off')
     x = np.arange(len(groups))
 
     # 1) draw repo circles
-    xs, ys, sizes, labels = [], [], [], []
+    xs, ys, commit_sizes, line_sizes, labels = [], [], [], [], []
     for gi, grp in enumerate(groups):
         n = len(grp['repos'])
         for ri, repo in enumerate(grp['repos']):
             c = repo_metrics[gi][ri]['commit_count']
+            l = repo_metrics[gi][ri]['line_count']
             xs.append(x[gi])
             ys.append((ri+1)/(n+1))
-            sizes.append(c)
-            labels.append(repo['name'])
-    sizes = np.array(sizes, float)
-    if sizes.size:
-        areas = sizes / sizes.max() * 2000
+            # Use log scale for both metrics
+            commit_sizes.append(c + 1)
+            line_sizes.append(l + 1)
+            labels.append((repo['name'], c, l))
+
+    # Convert to arrays and normalize
+    commit_sizes = np.array(commit_sizes, float)
+    line_sizes = np.array(line_sizes, float)
+    
+    if commit_sizes.size:
+        commit_areas = (commit_sizes) / 50
+        line_areas = (line_sizes) / 700
     else:
-        areas = np.array([])
-    ax.scatter(xs, ys, s=areas, alpha=0.6, edgecolor='k')
-    for xx, yy, lbl in zip(xs, ys, labels):
-        ax.text(xx, yy, lbl, ha='center', va='center', fontsize=8)
+        commit_areas = np.array([])
+        line_areas = np.array([])
+
+    # Draw circles - larger one first (lower z-index)
+    for xx, yy, commit_area, line_area in zip(xs, ys, commit_areas, line_areas):
+        # Determine which is larger to set z-order
+        if commit_area > line_area:
+            # Commits circle (blue) is larger, draw first
+            ax.scatter(xx, yy, s=commit_area, color='blue', alpha=0.4, edgecolor='k', zorder=1)
+            ax.scatter(xx, yy, s=line_area, color='red', alpha=0.4, edgecolor='k', zorder=2)
+        else:
+            # Lines circle (red) is larger, draw first
+            ax.scatter(xx, yy, s=line_area, color='red', alpha=0.4, edgecolor='k', zorder=1)
+            ax.scatter(xx, yy, s=commit_area, color='blue', alpha=0.4, edgecolor='k', zorder=2)
+    
+    # Draw labels with metrics
+    for xx, yy, (lbl, commits, lines) in zip(xs, ys, labels):
+        # Main label
+        ax.text(xx, yy + 0.02, lbl, ha='center', va='bottom', fontsize=10, zorder=3)
+        # Metrics in smaller font
+        metrics = f"{commits:,} commits, {lines:,} lines"
+        ax.text(xx, yy - 0.02, metrics, ha='center', va='top', fontsize=7, zorder=3)
 
     # 2) compute mass = log(commits+1)+log(lines+1)
     masses = []
@@ -146,8 +171,8 @@ def plot(groups, repo_metrics):
             continue
 
         # height so that circles (at y=(ri+1)/(n+1)) fit nicely
-        y0 = 1/(n+1) - 0.05
-        height = (n/(n+1) + 0.05) - y0
+        y0 = 1/(n+1) - 0.08  # Increased spacing to accommodate metrics text
+        height = (n/(n+1) + 0.08) - y0  # Increased spacing to accommodate metrics text
 
         # width directly from mass
         raw_w = (masses[gi] / max_mass) * width_base
