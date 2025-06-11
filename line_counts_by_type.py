@@ -5,6 +5,7 @@ and prints the total line counts summed by file extension.
 """
 import argparse
 import os
+import glob
 import sys
 import subprocess
 from collections import defaultdict
@@ -36,30 +37,34 @@ def count_lines_by_extension(root_dir):
     Only counts files with extensions in VALID_EXTENSIONS.
     """
     ext_counts = defaultdict(int)
-    
+
     try:
         # Run git ls-files and get the output
-        result = subprocess.run(
-            ['git', 'ls-files'],
-            cwd=root_dir,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
-        for file_path in result.stdout.splitlines():
+        if os.path.isdir(os.path.join(root_dir, '.git')):
+            result = subprocess.run(
+                ['git', 'ls-files'],
+                cwd=root_dir,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            files = result.stdout.splitlines()
+        else:
+            files = glob.glob(os.path.join(root_dir, '/**'), recursive=True)
+
+        for file_path in files:
             if '/test' in file_path or '_test.' in file_path:
                 continue
-                
+
             full_path = os.path.join(root_dir, file_path)
             # Determine extension (lowercased), files without an extension use empty string
             _, ext = os.path.splitext(file_path)
             ext = ext.lower().lstrip('.')  # Remove the leading dot
-            
+
             # Skip files without valid extensions
             if ext not in VALID_EXTENSIONS:
                 continue
-            
+
             try:
                 with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
                     # Count lines
@@ -68,11 +73,11 @@ def count_lines_by_extension(root_dir):
             except (OSError, UnicodeError) as e:
                 # Skip files we can't read
                 print(f"Warning: could not read {full_path}: {e}", file=sys.stderr)
-                
+
     except subprocess.CalledProcessError as e:
         print(f"Error running git ls-files: {e}", file=sys.stderr)
         sys.exit(1)
-        
+
     return ext_counts
 
 
