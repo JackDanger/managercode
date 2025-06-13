@@ -5,6 +5,7 @@ import argparse
 from collections import Counter, defaultdict
 from datetime import datetime, date
 import calendar
+from datetime import timedelta
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy as np
@@ -209,19 +210,19 @@ def main():
             repo_data_smooth.append(np.interp(x_smooth, np.arange(len(data)), data))
     
     # Plotting with stacked area
-    plt.figure(figsize=(20, 7))  # Much wider figure to accommodate legend on the left
+    plt.figure(figsize=(15, 7))  # Much wider figure to accommodate legend on the left
     plt.stackplot(all_months_dt_smooth, *repo_data_smooth, labels=repo_labels, alpha=0.8)
 
-    # Set x-axis limits to match actual data range
-    plt.xlim(all_months_dt[0], all_months_dt[-1])
+    # Set x-axis limits to match actual data range, with 5 days padding on each end
+    plt.xlim(all_months_dt[0] - timedelta(days=5), all_months_dt[-1] + timedelta(days=15))
     
     plt.xlabel("Month")
     plt.ylabel("Total Non-Merge Commits (Stacked)")
-    plt.title(f"Monthly Commits for {', '.join(dir_basenames)} (Stacked)")
+    plt.title("Monthly Commits")
     plt.legend(bbox_to_anchor=(-0.1, 1), loc='upper right')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.subplots_adjust(left=0.15)  # Add extra space on the left for the legend
+    plt.subplots_adjust(left=0.25)  # Add extra space on the left for the legend
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
     plt.gca().xaxis.set_major_locator(mdates.MonthLocator(interval=max(len(all_months)//12, 1)))
     plt.xticks(rotation=45)
