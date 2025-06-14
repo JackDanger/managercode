@@ -1795,12 +1795,6 @@ The enhanced format trades training time for knowledge comprehensiveness, making
             for msg_row in batch:
                 ts, user_id, thread_ts, subtype, reply_count = msg_row
 
-                # Skip system messages and bot messages (nobody cares about them)
-                if subtype in ["channel_join", "channel_leave", "bot_message"]:
-                    if subtype == "bot_message":
-                        stats["bot_messages_filtered"] += 1
-                    continue
-
                 # Get the full message data
                 raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
                 if not raw_data:
