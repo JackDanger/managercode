@@ -138,7 +138,7 @@ class DatabaseManager:
         """
     def _get_messages_index_ddl(self) -> str:
         return """
-        CREATE INDEX IF NOT EXISTS subtype_idx ON messages(subtype);
+        CREATE INDEX IF NOT EXISTS channel_subtype_ts_idx ON messages(channel_id, subtype, ts);
         """
 
     def _get_users_schema(self) -> str:
@@ -1788,9 +1788,9 @@ The enhanced format trades training time for knowledge comprehensiveness, making
                 FROM messages m
                 WHERE m.channel_id = ?
                 AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
-                ORDER BY m.ts
+                -- ORDER BY m.ts
                 LIMIT ? OFFSET ?
-            """,
+                """,
                 (channel_id, batch_size, offset),
             )
 
