@@ -42,13 +42,13 @@ class DatabaseManager:
     def connect(self) -> None:
         """Establish database connection and setup schema."""
         self.conn = sqlite3.connect(self.db_path)
-
+        
         # Performance optimizations
         self.conn.execute("PRAGMA journal_mode = WAL")  # Write-Ahead Logging for better concurrency
         self.conn.execute("PRAGMA synchronous = NORMAL")  # Sync less often (1=NORMAL, 2=FULL, 0=OFF)
         self.conn.execute("PRAGMA cache_size = 10000")  # Increase cache size (in pages)
         self.conn.execute("PRAGMA temp_store = MEMORY")  # Store temp tables in memory
-
+        
         self._setup_schema()
 
     def close(self) -> None:
@@ -533,10 +533,10 @@ class MessageProcessor:
         messages_processed = 0
         latest_ts = None
         oldest_ts = None
-
+        
         # Start a single transaction for the entire batch
         self.db.conn.execute("BEGIN TRANSACTION")
-
+        
         try:
             for m in messages:
                 ts = m.get("ts")
@@ -558,10 +558,10 @@ class MessageProcessor:
                 except (ValueError, TypeError) as e:
                     logging.warning(f"Error processing message with ts={ts}: {e}")
                     continue
-
+            
             # Commit the batch of inserts
             self.db.conn.commit()
-
+            
         except Exception as e:
             # Rollback on error
             self.db.conn.rollback()
@@ -1013,12 +1013,12 @@ class Exporter:
     # Conservative defaults for basic export
     MAX_CONTEXT_MESSAGES = 10
     MAX_TOKENS_PER_CONVERSATION = 2048
-
+    
     # Enhanced settings for comprehensive knowledge capture
     ENHANCED_MAX_TOKENS = 8192  # For long-form content
     ENHANCED_MAX_MESSAGES = 50  # More context for complex discussions
     KNOWLEDGE_EXTRACTION_TOKENS = 16384  # For deep technical discussions
-
+    
     # Thresholds for identifying valuable content
     MIN_MESSAGE_LENGTH = 100  # Characters - filter out short messages
     THREAD_IMPORTANCE_THRESHOLD = 3  # Minimum replies to consider thread important
@@ -1071,7 +1071,7 @@ class Exporter:
         """Calculate importance score for content based on multiple factors."""
         score = 0.0
         text = msg_data.get("text", "")
-
+        
         # Length factor (longer messages often contain more knowledge)
         if len(text) > 500:
             score += 3.0
@@ -1079,12 +1079,12 @@ class Exporter:
             score += 2.0
         elif len(text) > 100:
             score += 1.0
-
+        
         # Technical keyword density
         text_lower = text.lower()
         keyword_count = sum(1 for keyword in self.TECHNICAL_KEYWORDS if keyword in text_lower)
         score += keyword_count * 0.5
-
+        
         # Thread engagement (replies indicate valuable discussion)
         reply_count = msg_data.get("reply_count", 0)
         if reply_count > 10:
@@ -1093,25 +1093,25 @@ class Exporter:
             score += 2.0
         elif reply_count > 2:
             score += 1.0
-
+        
         # File attachments (often contain important documentation)
         if msg_data.get("files"):
             score += 2.0
-
+        
         # Code blocks or formatted content
         if "```" in text or "`" in text:
             score += 1.5
-
+        
         # URLs (often reference important resources)
         if "http" in text:
             score += 0.5
-
+        
         # Reactions (community validation of importance)
         reactions = msg_data.get("reactions", [])
         if reactions:
             total_reactions = sum(r.get("count", 0) for r in reactions)
             score += min(total_reactions * 0.1, 2.0)  # Cap at 2.0
-
+        
         return score
 
     def _format_message(
@@ -1119,7 +1119,7 @@ class Exporter:
     ) -> str:
         """Enhanced message formatting with optional metadata."""
         text = msg.get("text", "").strip()
-
+        
         # Add timestamp if requested
         if include_metadata:
             ts = msg.get("ts", "")
@@ -1163,7 +1163,7 @@ class Exporter:
     def _create_knowledge_extraction_prompt(self, conversation: Dict, context_type: str) -> Dict:
         """Create sophisticated prompts for knowledge extraction."""
         content = "\n".join(msg["content"] for msg in conversation["messages"])
-
+        
         prompts = {
             "concept_explanation": {
                 "system": "You are an expert at extracting and explaining technical concepts from workplace discussions. Your role is to identify key concepts, processes, and knowledge shared in conversations and explain them clearly and comprehensively.",
@@ -1186,7 +1186,7 @@ class Exporter:
                 "assistant": "I'll identify the decisions made and capture the complete rationale and reasoning process for future reference."
             }
         }
-
+        
         return prompts.get(context_type, prompts["concept_explanation"])
 
     def _process_channel_conversations_enhanced(
@@ -1205,7 +1205,7 @@ class Exporter:
         )
 
         conversations = []
-
+        
         if strategy == "knowledge_focused":
             # Focus on high-value knowledge content
             return self._process_knowledge_focused(channel_id, channel_name, cur.fetchall())
@@ -1223,43 +1223,43 @@ class Exporter:
         """Process focusing on high-knowledge-value content."""
         conversations = []
         high_value_messages = []
-
+        
         for msg_row in msg_rows:
             ts, user_id, thread_ts, subtype = msg_row
-
+            
             if subtype in ["channel_join", "channel_leave", "bot_message"]:
                 continue
-
+                
             raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
             if not raw_data:
                 continue
-
+                
             msg_data = json.loads(raw_data)
-
+            
             # Calculate importance score
             thread_msgs = []
             if not thread_ts and msg_data.get("reply_count", 0) > 0:
                 thread_msgs = self._get_thread_messages(channel_id, ts)
-
+            
             importance = self._calculate_content_importance(msg_data, thread_msgs)
-
+            
             # Only include high-value content
             if importance >= 2.0:  # Threshold for knowledge-worthy content
                 user_name = self.db.get_user_display_name(user_id)
                 formatted_msg = self._format_message(msg_data, user_name, include_metadata=True)
-
+                
                 # Include thread content for complete context
                 if thread_msgs:
                     thread_text = "\n".join([
                         self._format_message(
-                            tm,
+                            tm, 
                             self.db.get_user_display_name(tm.get("user")),
                             include_reactions=False,
                             include_metadata=True
                         ) for tm in thread_msgs
                     ])
                     formatted_msg += f"\n[Thread responses:\n{thread_text}\n]"
-
+                
                 high_value_messages.append({
                     "timestamp": ts,
                     "user": user_name,
@@ -1267,7 +1267,7 @@ class Exporter:
                     "importance": importance,
                     "tokens": self._estimate_tokens(formatted_msg)
                 })
-
+        
         # Group high-value messages into conversations with larger context windows
         current_conversation = {
             "channel": channel_name,
@@ -1275,11 +1275,11 @@ class Exporter:
             "token_count": 0,
             "importance_score": 0.0
         }
-
+        
         for msg in high_value_messages:
             if (current_conversation["token_count"] + msg["tokens"] > self.KNOWLEDGE_EXTRACTION_TOKENS or
                 len(current_conversation["messages"]) >= self.ENHANCED_MAX_MESSAGES):
-
+                
                 if current_conversation["messages"]:
                     conversations.append(current_conversation)
                 current_conversation = {
@@ -1288,42 +1288,42 @@ class Exporter:
                     "token_count": 0,
                     "importance_score": 0.0
                 }
-
+            
             current_conversation["messages"].append(msg)
             current_conversation["token_count"] += msg["tokens"]
             current_conversation["importance_score"] += msg["importance"]
-
+        
         if current_conversation["messages"]:
             conversations.append(current_conversation)
-
+        
         return conversations
 
     def _process_thread_complete(self, channel_id: str, channel_name: str, msg_rows: List) -> List[Dict]:
         """Process ensuring complete thread capture regardless of size."""
         conversations = []
         thread_conversations = {}  # thread_ts -> conversation
-
+        
         for msg_row in msg_rows:
             ts, user_id, thread_ts, subtype = msg_row
-
+            
             if subtype in ["channel_join", "channel_leave", "bot_message"]:
                 continue
-
+                
             raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
             if not raw_data:
                 continue
-
+                
             msg_data = json.loads(raw_data)
             user_name = self.db.get_user_display_name(user_id)
             formatted_msg = self._format_message(msg_data, user_name, include_metadata=True)
-
+            
             msg_obj = {
                 "timestamp": ts,
                 "user": user_name,
                 "content": formatted_msg,
                 "tokens": self._estimate_tokens(formatted_msg)
             }
-
+            
             if thread_ts:
                 # This is part of a thread
                 if thread_ts not in thread_conversations:
@@ -1347,7 +1347,7 @@ class Exporter:
                             "token_count": msg_obj["tokens"],
                             "thread_ts": ts
                         }
-
+                        
                         for tm in thread_msgs:
                             tm_user = self.db.get_user_display_name(tm.get("user"))
                             tm_formatted = self._format_message(tm, tm_user, include_metadata=True)
@@ -1359,7 +1359,7 @@ class Exporter:
                             }
                             thread_conv["messages"].append(tm_obj)
                             thread_conv["token_count"] += tm_obj["tokens"]
-
+                        
                         conversations.append(thread_conv)
                 else:
                     # Standalone message - group with nearby messages
@@ -1368,32 +1368,32 @@ class Exporter:
                         "messages": [msg_obj],
                         "token_count": msg_obj["tokens"]
                     })
-
+        
         # Add any remaining thread conversations
         conversations.extend(thread_conversations.values())
-
+        
         return conversations
 
     def _process_temporal_context(self, channel_id: str, channel_name: str, msg_rows: List) -> List[Dict]:
         """Process maintaining temporal context with overlapping windows."""
         conversations = []
         all_messages = []
-
+        
         # First, collect all messages with metadata
         for msg_row in msg_rows:
             ts, user_id, thread_ts, subtype = msg_row
-
+            
             if subtype in ["channel_join", "channel_leave", "bot_message"]:
                 continue
-
+                
             raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
             if not raw_data:
                 continue
-
+                
             msg_data = json.loads(raw_data)
             user_name = self.db.get_user_display_name(user_id)
             formatted_msg = self._format_message(msg_data, user_name, include_metadata=True)
-
+            
             all_messages.append({
                 "timestamp": float(ts),
                 "user": user_name,
@@ -1401,16 +1401,16 @@ class Exporter:
                 "tokens": self._estimate_tokens(formatted_msg),
                 "importance": self._calculate_content_importance(msg_data)
             })
-
+        
         # Create overlapping temporal windows
         window_size = self.ENHANCED_MAX_MESSAGES
         overlap = window_size // 3  # 33% overlap
-
+        
         for i in range(0, len(all_messages), window_size - overlap):
             window_messages = all_messages[i:i + window_size]
             if not window_messages:
                 continue
-
+                
             total_tokens = sum(msg["tokens"] for msg in window_messages)
             if total_tokens > self.KNOWLEDGE_EXTRACTION_TOKENS:
                 # Split this window further
@@ -1430,7 +1430,7 @@ class Exporter:
                     "token_count": total_tokens,
                     "temporal_window": True
                 })
-
+        
         return conversations
 
     def _process_comprehensive(self, channel_id: str, channel_name: str, msg_rows: List) -> List[Dict]:
@@ -1439,28 +1439,28 @@ class Exporter:
         knowledge_focused = self._process_knowledge_focused(channel_id, channel_name, msg_rows)
         thread_complete = self._process_thread_complete(channel_id, channel_name, msg_rows)
         temporal_context = self._process_temporal_context(channel_id, channel_name, msg_rows)
-
+        
         # Combine and deduplicate while preserving different perspectives
         all_conversations = []
-
+        
         # Add knowledge-focused conversations with high priority
         for conv in knowledge_focused:
             conv["strategy"] = "knowledge_focused"
             conv["priority"] = "high"
             all_conversations.append(conv)
-
+        
         # Add complete threads
         for conv in thread_complete:
             conv["strategy"] = "thread_complete"
             conv["priority"] = "medium"
             all_conversations.append(conv)
-
+        
         # Add temporal context
         for conv in temporal_context:
             conv["strategy"] = "temporal_context"
             conv["priority"] = "low"
             all_conversations.append(conv)
-
+        
         return all_conversations
 
     def _write_enhanced_training_file(
@@ -1473,15 +1473,15 @@ class Exporter:
     ) -> str:
         """Write enhanced training data with multiple prompt types."""
         output_path = os.path.join(output_dir, f"{channel_name}_{strategy}.jsonl")
-
+        
         with open(output_path, "w", encoding="utf-8") as f:
             for conv in conversations:
                 # Create multiple training examples per conversation
                 prompt_types = ["concept_explanation", "problem_solution", "process_documentation", "decision_rationale"]
-
+                
                 for prompt_type in prompt_types:
                     prompt_data = self._create_knowledge_extraction_prompt(conv, prompt_type)
-
+                    
                     # Enhanced metadata
                     metadata = {
                         "channel": conv["channel"],
@@ -1496,7 +1496,7 @@ class Exporter:
                             conv["messages"][-1]["timestamp"] if conv["messages"] else None
                         ]
                     }
-
+                    
                     training_example = {
                         "conversations": [
                             {
@@ -1504,7 +1504,7 @@ class Exporter:
                                 "content": prompt_data["system"]
                             },
                             {
-                                "role": "user",
+                                "role": "user", 
                                 "content": prompt_data["user"]
                             },
                             {
@@ -1514,43 +1514,43 @@ class Exporter:
                         ],
                         "metadata": metadata
                     }
-
+                    
                     f.write(json.dumps(training_example, ensure_ascii=False) + "\n")
-
+        
         return output_path
 
     def export_for_comprehensive_training(self, output_dir: str, strategies: List[str] = None) -> None:
         """Export with comprehensive knowledge capture strategies."""
         if strategies is None:
             strategies = ["knowledge_focused", "thread_complete", "temporal_context", "comprehensive"]
-
+        
         os.makedirs(output_dir, exist_ok=True)
-
+        
         channels = self._get_all_channels()
         all_files = []
         total_conversations = 0
-
+        
         print(f"\nExporting {len(channels)} channels with enhanced strategies: {', '.join(strategies)}")
-
+        
         for channel_id, channel_name in channels:
             try:
                 print(f"Processing channel #{channel_name}...")
-
+                
                 for strategy in strategies:
                     conversations = self._process_channel_conversations_enhanced(
                         channel_id, channel_name, strategy
                     )
-
+                    
                     if not conversations:
                         continue
-
+                    
                     output_path = self._write_enhanced_training_file(
                         channel_id, channel_name, conversations, output_dir, strategy
                     )
-
+                    
                     # Calculate total training examples (4 prompt types per conversation)
                     training_examples = len(conversations) * 4
-
+                    
                     all_files.append({
                         "path": output_path,
                         "strategy": strategy,
@@ -1558,17 +1558,17 @@ class Exporter:
                         "training_examples": training_examples,
                         "channel": channel_name
                     })
-
+                    
                     total_conversations += len(conversations)
                     print(f"  {strategy}: {len(conversations)} conversations, {training_examples} training examples")
-
+                    
             except Exception as e:
                 logging.error(f"Error processing channel {channel_name}: {str(e)}")
                 continue
-
+        
         # Write comprehensive metadata
         self._write_enhanced_metadata(output_dir, total_conversations, channels, all_files, strategies)
-
+        
         total_examples = sum(f["training_examples"] for f in all_files)
         print(f"\nEnhanced export complete:")
         print(f"  Total conversations: {total_conversations:,}")
@@ -1612,10 +1612,10 @@ class Exporter:
                 ]
             }
         }
-
+        
         with open(os.path.join(output_dir, "enhanced_summary.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
-
+        
         # Enhanced README
         readme_content = f"""# Enhanced Slack Knowledge Training Data
 
@@ -1629,7 +1629,7 @@ This directory contains Slack conversations optimized for comprehensive organiza
 - Context window: {self.KNOWLEDGE_EXTRACTION_TOKENS:,} tokens
 - Filters out low-value content to focus on knowledge-dense discussions
 
-### Thread-Complete Export
+### Thread-Complete Export  
 - Ensures complete thread capture regardless of size
 - Maintains full context for complex discussions
 - Preserves problem-solution continuity
@@ -1652,7 +1652,7 @@ This directory contains Slack conversations optimized for comprehensive organiza
 Each conversation generates 4 training examples with different prompt types:
 
 1. **Concept Explanation**: Extract and explain technical concepts
-2. **Problem-Solution**: Document troubleshooting and solutions
+2. **Problem-Solution**: Document troubleshooting and solutions  
 3. **Process Documentation**: Capture workflows and procedures
 4. **Decision Rationale**: Preserve decision-making reasoning
 
@@ -1683,352 +1683,189 @@ This format is designed for scenarios where you want to spend extra GPU cycles f
 
 The enhanced format trades training time for knowledge comprehensiveness, making your fine-tuned model much more capable of explaining organizational concepts that were discussed informally in Slack.
 """
-
+        
         with open(os.path.join(output_dir, "ENHANCED_README.md"), "w", encoding="utf-8") as f:
             f.write(readme_content)
 
-    # Keep the original export method for backward compatibility
-    def export_for_axolotl(self, output_dir: str) -> None:
-        """Export database contents in a format suitable for LLM fine-tuning."""
+    def export_for_rag(self, output_dir: str, include_thread_summaries: bool = True, batch_size: int = 1000) -> None:
+        """Export database contents optimized for RAG (Retrieval Augmented Generation).
+        
+        Streams the export process to handle very large databases with minimal memory overhead.
+        Bot messages are automatically filtered out as they contain no useful information.
+        """
         os.makedirs(output_dir, exist_ok=True)
-
+        
         channels = self._get_all_channels()
-        channel_files = []
-        total_conversations = 0
-
-        print(f"\nExporting {len(channels)} channels to {output_dir}...")
-
-        for channel_id, channel_name in channels:
-            try:
-                print(f"Processing channel #{channel_name}...")
-                conversations = self._process_channel_conversations(
-                    channel_id, channel_name
-                )
-                if not conversations:
-                    print(f"  No conversations found in #{channel_name}")
-                    continue
-
-                output_path = self._write_channel_file(
-                    channel_id, channel_name, conversations, output_dir
-                )
-                channel_files.append(
-                    {
-                        "path": output_path,
-                        "type": "conversation",
-                        "conversation_count": len(conversations),
-                    }
-                )
-                total_conversations += len(conversations)
-                print(f"  Exported {len(conversations)} conversations")
-
-            except Exception as e:
-                logging.error(f"Error processing channel {channel_name}: {str(e)}")
-                continue
-
-        self._write_metadata_files(
-            output_dir, total_conversations, channels, channel_files
-        )
-        print(
-            f"\nExport complete: {total_conversations:,} conversations from {len(channels)} channels"
-        )
-
-    def _process_channel_conversations(
-        self, channel_id: str, channel_name: str
-    ) -> List[Dict]:
-        """Process channel messages into coherent conversation chunks for fine-tuning."""
-        cur = self.db.conn.cursor()
-        cur.execute(
-            """
-            SELECT m.ts, m.user_id, m.thread_ts, m.subtype
-            FROM messages m
-            WHERE m.channel_id = ?
-            ORDER BY m.ts
-        """,
-            (channel_id,),
-        )
-
-        conversations = []
-        current_conversation = {
-            "channel": channel_name,
-            "messages": [],
-            "token_count": 0,
-        }
-
-        last_ts = None
-        time_gap_threshold = 3600 * 24  # 1 day in seconds
-
-        for msg_row in cur.fetchall():
-            ts, user_id, thread_ts, subtype = msg_row
-
-            # Skip system messages
-            if subtype in ["channel_join", "channel_leave", "bot_message"]:
-                continue
-
-            # Get the full message data
-            raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
-            if not raw_data:
-                continue
-
-            msg_data = json.loads(raw_data)
-            user_name = self.db.get_user_display_name(user_id)
-
-            # Format the message
-            formatted_msg = self._format_message(msg_data, user_name)
-            msg_tokens = self._estimate_tokens(formatted_msg)
-
-            # Check if this is a thread starter
-            if not thread_ts and msg_data.get("reply_count", 0) > 0:
-                # Get thread messages
-                thread_msgs = self._get_thread_messages(channel_id, ts)
-                thread_text = "\n".join(
-                    [
-                        self._format_message(
-                            tm,
-                            self.db.get_user_display_name(tm.get("user")),
-                            include_reactions=False,
-                        )
-                        for tm in thread_msgs
-                    ]
-                )
-                formatted_msg += f"\n[Thread responses:\n{thread_text}\n]"
-                msg_tokens = self._estimate_tokens(formatted_msg)
-
-            # Start a new conversation if:
-            # 1. Adding this message would exceed token limit
-            # 2. Time gap is too large
-            # 3. Current conversation already has max messages
-            if (
-                current_conversation["token_count"] + msg_tokens
-                > self.MAX_TOKENS_PER_CONVERSATION
-                or (last_ts and float(ts) - float(last_ts) > time_gap_threshold)
-                or len(current_conversation["messages"]) >= self.MAX_CONTEXT_MESSAGES
-            ):
-
-                if current_conversation["messages"]:
-                    conversations.append(current_conversation)
-                current_conversation = {
-                    "channel": channel_name,
-                    "messages": [],
-                    "token_count": 0,
-                }
-
-            # Add message to current conversation
-            current_conversation["messages"].append(
-                {"timestamp": ts, "user": user_name, "content": formatted_msg}
-            )
-            current_conversation["token_count"] += msg_tokens
-            last_ts = ts
-
-        # Add the last conversation if it has messages
-        if current_conversation["messages"]:
-            conversations.append(current_conversation)
-
-        return conversations
-
-    def _write_channel_file(
-        self,
-        channel_id: str,
-        channel_name: str,
-        conversations: List[Dict],
-        output_dir: str,
-    ) -> str:
-        """Write channel conversations to a file in a format suitable for fine-tuning."""
-        output_path = os.path.join(output_dir, f"{channel_name}.jsonl")
-        with open(output_path, "w", encoding="utf-8") as f:
-            for conv in conversations:
-                # Format for axolotl fine-tuning
-                formatted_conv = {
-                    "conversations": [
-                        {
-                            "role": "system",
-                            "content": "You are a helpful AI assistant that understands Slack conversations and can answer questions about them.",
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Channel: #{conv['channel']}\n\n"
-                            + "\n".join(msg["content"] for msg in conv["messages"]),
-                        },
-                        {
-                            "role": "assistant",
-                            "content": "I understand the conversation and can answer questions about its content, participants, and key points discussed.",
-                        },
-                    ]
-                }
-                f.write(json.dumps(formatted_conv, ensure_ascii=False) + "\n")
-        return output_path
-
-    def _write_metadata_files(
-        self,
-        output_dir: str,
-        total_conversations: int,
-        channels: List[Tuple[str, str]],
-        channel_files: List[Dict],
-    ) -> None:
-        """Write metadata files for the export."""
-        summary = {
-            "total_conversations": total_conversations,
-            "total_channels": len(channels),
-            "channels": [{"id": ch_id, "name": ch_name} for ch_id, ch_name in channels],
-            "files": channel_files,
-                            "exported_at": datetime.now().isoformat(),
-                "format_info": {
-                    "max_context_messages": self.MAX_CONTEXT_MESSAGES,
-                "max_tokens_per_conversation": self.MAX_TOKENS_PER_CONVERSATION,
-                "format": "instruction-input-output pairs with metadata",
-                "instruction_template": "Given the following Slack conversation...",
-                "usage_notes": [
-                    "Each conversation is limited to prevent context window overflow",
-                    "Threads are included with their parent messages",
-                    "System messages are filtered out",
-                    "Reactions and edits are preserved as contextual information",
-                    "File shares are noted but content is not included",
-                ],
-            },
-        }
-
-        with open(os.path.join(output_dir, "summary.json"), "w", encoding="utf-8") as f:
-            json.dump(summary, f, indent=2, ensure_ascii=False)
-
-        # Write a README with usage instructions
-        readme_content = f"""# Slack Conversation Training Data
-
-This directory contains Slack conversations exported for LLM fine-tuning.
-
-## Format
-
-Each .jsonl file contains conversations from a single channel, formatted as instruction-input-output pairs:
-
-```json
-{{
-    "instruction": "Given the following Slack conversation...",
-    "input": "Channel: #channel-name\\nuser1: message1\\nuser2: message2...",
-    "output": "I understand the conversation...",
-    "metadata": {{...}}
-}}
-```
-
-## Usage Notes
-
-- Maximum context size: {self.MAX_TOKENS_PER_CONVERSATION} tokens per conversation
-- Maximum messages per context: {self.MAX_CONTEXT_MESSAGES}
-- Conversations are split based on:
-  - Token limit
-  - Time gaps (>1 hour)
-  - Message count
-- Thread responses are included with their parent messages
-- Reactions and edits are preserved as contextual information
-
-## Statistics
-
-- Total conversations: {total_conversations:,}
-- Total channels: {len(channels):,}
-- Export date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-See summary.json for detailed statistics and channel information.
-"""
-        with open(os.path.join(output_dir, "README.md"), "w", encoding="utf-8") as f:
-            f.write(readme_content)
-
-    def export_for_rag(self, output_dir: str, include_thread_summaries: bool = True) -> None:
-        """Export database contents optimized for RAG (Retrieval Augmented Generation)."""
-        os.makedirs(output_dir, exist_ok=True)
-
-        channels = self._get_all_channels()
-        all_documents = []
-
-        print(f"\nExporting {len(channels)} channels for RAG to {output_dir}...")
-
-        for channel_id, channel_name in channels:
-            try:
-                print(f"Processing channel #{channel_name}...")
-                channel_docs = self._process_channel_for_rag(channel_id, channel_name, include_thread_summaries)
-                all_documents.extend(channel_docs)
-                print(f"  Generated {len(channel_docs)} documents")
-
-            except Exception as e:
-                logging.error(f"Error processing channel {channel_name}: {str(e)}")
-                continue
-
-        # Write documents to file
         output_path = os.path.join(output_dir, "slack_rag_documents.jsonl")
+        
+        # Statistics tracking (incremental)
+        stats = {
+            "total_documents": 0,
+            "document_types": defaultdict(int),
+            "channels": len(channels),
+            "users": set(),
+            "date_range": {"earliest": None, "latest": None},
+            "content_types": defaultdict(int),
+            "total_length": 0,
+            "has_code": 0,
+            "has_files": 0,
+            "threads": 0,
+            "bot_messages_filtered": 0,
+        }
+        
+        print(f"\nStreaming export of {len(channels)} channels for RAG to {output_dir}...")
+        print("Bot messages are automatically filtered out")
+        
+        # Stream documents to file, processing one channel at a time
         with open(output_path, "w", encoding="utf-8") as f:
-            for doc in all_documents:
-                f.write(json.dumps(doc, ensure_ascii=False) + "\n")
-
+            for channel_id, channel_name in channels:
+                try:
+                    print(f"Processing channel #{channel_name}...")
+                    channel_doc_count = 0
+                    
+                    # Process channel in streaming fashion
+                    for doc in self._stream_channel_for_rag(channel_id, channel_name, include_thread_summaries, batch_size, stats):
+                        # Write document immediately
+                        f.write(json.dumps(doc, ensure_ascii=False) + "\n")
+                        
+                        # Update statistics incrementally
+                        self._update_stats_incremental(stats, doc)
+                        channel_doc_count += 1
+                        
+                        # Periodic progress update for large channels
+                        if channel_doc_count % 10000 == 0:
+                            print(f"  ...processed {channel_doc_count:,} documents")
+                    
+                    print(f"  Generated {channel_doc_count:,} documents")
+                    
+                except Exception as e:
+                    logging.error(f"Error processing channel {channel_name}: {str(e)}")
+                    continue
+        
+        # Finalize statistics
+        self._finalize_stats(stats)
+        
         # Create metadata and statistics
-        self._write_rag_metadata(output_dir, all_documents, channels)
-
-        print(f"\nRAG export complete: {len(all_documents):,} documents")
+        self._write_rag_metadata_streaming(output_dir, stats, channels)
+        
+        print(f"\nRAG export complete: {stats['total_documents']:,} documents")
+        print(f"Bot messages filtered: {stats['bot_messages_filtered']:,}")
         print(f"Output: {output_path}")
 
-    def _process_channel_for_rag(self, channel_id: str, channel_name: str, include_thread_summaries: bool) -> List[Dict]:
-        """Process a channel into RAG-optimized documents."""
+    def _stream_channel_for_rag(self, channel_id: str, channel_name: str, include_thread_summaries: bool, batch_size: int, stats: Dict):
+        """Stream RAG-optimized documents for a channel with minimal memory overhead."""
+        # Use a separate cursor for this operation to avoid conflicts
         cur = self.db.conn.cursor()
-        cur.execute(
-            """
-            SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
-            FROM messages m
-            WHERE m.channel_id = ?
-            ORDER BY m.ts
-        """,
-            (channel_id,),
-        )
-
-        documents = []
         processed_threads = set()
-
-        for msg_row in cur.fetchall():
-            ts, user_id, thread_ts, subtype, reply_count = msg_row
-
-            # Skip system messages
-            if subtype in ["channel_join", "channel_leave", "bot_message"]:
-                continue
-
-            # Get the full message data
-            raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
-            if not raw_data:
-                continue
-
-            msg_data = json.loads(raw_data)
-            user_name = self.db.get_user_display_name(user_id)
-
-            # Create individual message document
-            msg_doc = self._create_message_document(
-                msg_data, user_name, channel_name, channel_id, ts
+        
+        # For very large channels, we need to be extra careful about memory
+        # Use server-side cursor with LIMIT/OFFSET to handle massive channels
+        offset = 0
+        
+        # Get total count for progress tracking (optional for very large DBs)
+        try:
+            cur.execute("SELECT COUNT(*) FROM messages WHERE channel_id = ? AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')", (channel_id,))
+            total_count = cur.fetchone()[0]
+        except:
+            total_count = None  # Skip progress tracking if count is too expensive
+        
+        while True:
+            # Fetch messages in batches to avoid loading entire channel into memory
+            cur.execute(
+                """
+                SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
+                FROM messages m
+                WHERE m.channel_id = ?
+                ORDER BY m.ts
+                LIMIT ? OFFSET ?
+            """,
+                (channel_id, batch_size, offset),
             )
-            documents.append(msg_doc)
-
-            # Create thread summary document if this is a thread starter
-            if (include_thread_summaries and
-                not thread_ts and
-                reply_count and reply_count > 2 and
-                ts not in processed_threads):
-
-                thread_doc = self._create_thread_document(
-                    channel_id, channel_name, ts, msg_data, user_name
-                )
-                if thread_doc:
-                    documents.append(thread_doc)
-                    processed_threads.add(ts)
-
-        return documents
+            
+            batch = cur.fetchall()
+            if not batch:
+                break
+            
+            for msg_row in batch:
+                ts, user_id, thread_ts, subtype, reply_count = msg_row
+                
+                # Skip system messages and bot messages (nobody cares about them)
+                if subtype in ["channel_join", "channel_leave", "bot_message"]:
+                    if subtype == "bot_message":
+                        stats["bot_messages_filtered"] += 1
+                    continue
+                    
+                # Get the full message data
+                raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
+                if not raw_data:
+                    continue
+                    
+                try:
+                    msg_data = json.loads(raw_data)
+                    
+                    # Additional bot message filtering based on message content
+                    if msg_data.get("bot_id") or msg_data.get("username"):
+                        stats["bot_messages_filtered"] += 1
+                        continue
+                    
+                    user_name = self.db.get_user_display_name(user_id)
+                    
+                    # Yield individual message document
+                    msg_doc = self._create_message_document(
+                        msg_data, user_name, channel_name, channel_id, ts
+                    )
+                    yield msg_doc
+                    
+                    # Yield thread summary document if this is a thread starter
+                    if (include_thread_summaries and 
+                        not thread_ts and 
+                        reply_count and reply_count > 2 and 
+                        ts not in processed_threads):
+                        
+                        thread_doc = self._create_thread_document(
+                            channel_id, channel_name, ts, msg_data, user_name
+                        )
+                        if thread_doc:
+                            yield thread_doc
+                            processed_threads.add(ts)
+                            
+                    # Explicit cleanup for large messages
+                    del msg_data, raw_data
+                    
+                except (json.JSONDecodeError, KeyError) as e:
+                    logging.warning(f"Error processing message {channel_id}_{ts}: {e}")
+                    continue
+            
+            offset += batch_size
+            
+            # Progress update for large channels
+            if total_count and offset % (batch_size * 10) == 0:
+                progress = min(100, (offset / total_count) * 100)
+                print(f"    Progress: {progress:.1f}% ({offset:,}/{total_count:,})")
+            
+            # Clear batch from memory explicitly
+            del batch
+            
+        # Clean up processed threads set
+        processed_threads.clear()
+        cur.close()
 
     def _create_message_document(self, msg_data: Dict, user_name: str, channel_name: str, channel_id: str, ts: str) -> Dict:
         """Create a RAG document for an individual message."""
         text = msg_data.get("text", "").strip()
-
+        
         # Clean up Slack formatting for better semantic search
         text = self._clean_slack_formatting(text)
-
+        
         # Extract mentioned users, channels, and links
         mentions = self._extract_mentions(msg_data.get("text", ""))
-
+        
         # Determine content type and importance
         content_type, importance_score = self._analyze_content_type(msg_data, text)
-
+        
         # Create timestamp
         dt = datetime.fromtimestamp(float(ts))
-
+        
         # Build the document
         document = {
             "id": f"{channel_id}_{ts}",
@@ -2060,7 +1897,7 @@ See summary.json for detailed statistics and channel information.
                 "word_count": len(text.split()) if text else 0,
             }
         }
-
+        
         # Add file information if present
         if msg_data.get("files"):
             file_info = []
@@ -2072,12 +1909,12 @@ See summary.json for detailed statistics and channel information.
                     "title": f.get("title", "")
                 })
             document["metadata"]["files"] = file_info
-
+            
             # Add file content to main content for search
             file_descriptions = [f"[File: {f['name']} ({f.get('type', 'unknown')})]" for f in file_info]
             if file_descriptions:
                 document["content"] += "\n" + "\n".join(file_descriptions)
-
+        
         return document
 
     def _create_thread_document(self, channel_id: str, channel_name: str, thread_ts: str, original_msg: Dict, original_user: str) -> Optional[Dict]:
@@ -2085,12 +1922,12 @@ See summary.json for detailed statistics and channel information.
         thread_messages = self._get_thread_messages(channel_id, thread_ts)
         if not thread_messages:
             return None
-
+            
         # Combine all thread messages
         all_messages = [original_msg] + thread_messages
         participants = set()
         full_conversation = []
-
+        
         for msg in all_messages:
             user_id = msg.get("user")
             if user_id:
@@ -2099,19 +1936,19 @@ See summary.json for detailed statistics and channel information.
                 text = self._clean_slack_formatting(msg.get("text", ""))
                 if text:
                     full_conversation.append(f"{user_name}: {text}")
-
+        
         if not full_conversation:
             return None
-
+            
         # Create thread summary
         conversation_text = "\n".join(full_conversation)
         original_text = self._clean_slack_formatting(original_msg.get("text", ""))
-
+        
         # Extract key topics/keywords from the thread
         thread_keywords = self._extract_thread_keywords(conversation_text)
-
+        
         dt = datetime.fromtimestamp(float(thread_ts))
-
+        
         return {
             "id": f"{channel_id}_thread_{thread_ts}",
             "content": f"Thread Discussion:\n\nOriginal: {original_text}\n\nConversation:\n{conversation_text}",
@@ -2137,20 +1974,20 @@ See summary.json for detailed statistics and channel information.
         """Clean Slack-specific formatting for better semantic search."""
         if not text:
             return ""
-
+            
         # Convert user mentions to readable format
         text = re.sub(r'<@([A-Z0-9]+)>', lambda m: f"@{self.db.get_user_display_name(m.group(1))}", text)
-
+        
         # Convert channel mentions
         text = re.sub(r'<#([A-Z0-9]+)\|([^>]+)>', r'#\2', text)
-
+        
         # Convert links
         text = re.sub(r'<(https?://[^|>]+)\|([^>]+)>', r'\2 (\1)', text)
         text = re.sub(r'<(https?://[^>]+)>', r'\1', text)
-
+        
         # Clean up extra whitespace
         text = re.sub(r'\s+', ' ', text).strip()
-
+        
         return text
 
     def _extract_mentions(self, text: str) -> Dict[str, List[str]]:
@@ -2160,142 +1997,133 @@ See summary.json for detailed statistics and channel information.
             "channels": [],
             "links": []
         }
-
+        
         if not text:
             return mentions
-
+            
         # Extract user mentions
         user_matches = re.findall(r'<@([A-Z0-9]+)>', text)
         mentions["users"] = [self.db.get_user_display_name(uid) for uid in user_matches]
-
+        
         # Extract channel mentions
         channel_matches = re.findall(r'<#[A-Z0-9]+\|([^>]+)>', text)
         mentions["channels"] = channel_matches
-
+        
         # Extract links
         link_matches = re.findall(r'<(https?://[^|>]+)', text)
         mentions["links"] = link_matches
-
+        
         return mentions
 
     def _analyze_content_type(self, msg_data: Dict, text: str) -> Tuple[str, float]:
         """Analyze message content to determine type and importance."""
         content_types = []
         importance = 1.0
-
+        
         # Check for different content indicators
         if "```" in text or text.count("`") > 2:
             content_types.append("code")
             importance += 1.5
-
+            
         if msg_data.get("files"):
             content_types.append("file_share")
             importance += 1.0
-
+            
         if msg_data.get("reply_count", 0) > 0:
             content_types.append("discussion_starter")
             importance += msg_data["reply_count"] * 0.3
-
+            
         if any(keyword in text.lower() for keyword in ["decision", "concluded", "agreed", "resolved"]):
             content_types.append("decision")
             importance += 2.0
-
+            
         if any(keyword in text.lower() for keyword in ["problem", "issue", "bug", "error", "broken"]):
             content_types.append("problem_report")
             importance += 1.5
-
+            
         if any(keyword in text.lower() for keyword in ["solution", "fix", "resolved", "working"]):
             content_types.append("solution")
             importance += 1.5
-
+            
         if any(keyword in text.lower() for keyword in ["architecture", "design", "process", "workflow"]):
             content_types.append("technical_discussion")
             importance += 1.0
-
+            
         if len(text) > 500:
             content_types.append("detailed_explanation")
             importance += 0.5
-
+            
         if msg_data.get("reactions"):
             content_types.append("community_validated")
             importance += sum(r.get("count", 0) for r in msg_data["reactions"]) * 0.1
-
+        
         return "|".join(content_types) if content_types else "general", min(importance, 5.0)
 
     def _extract_thread_keywords(self, conversation_text: str) -> List[str]:
         """Extract key topics and keywords from thread conversation."""
         # Simple keyword extraction - could be enhanced with NLP
         text = conversation_text.lower()
-
+        
         # Technical keywords
         tech_keywords = []
         for keyword in self.TECHNICAL_KEYWORDS:
             if keyword in text:
                 tech_keywords.append(keyword)
-
+        
         # System/product names (capitalize words that appear frequently)
         words = re.findall(r'\b[A-Z][a-z]+(?:[A-Z][a-z]*)*\b', conversation_text)
         word_freq = defaultdict(int)
         for word in words:
             if len(word) > 3:  # Skip short words
                 word_freq[word] += 1
-
+        
         # Get frequently mentioned proper nouns
         frequent_terms = [word for word, count in word_freq.items() if count > 1]
-
+        
         return sorted(list(set(tech_keywords + frequent_terms)))
 
-    def _write_rag_metadata(self, output_dir: str, documents: List[Dict], channels: List[Tuple[str, str]]) -> None:
-        """Write metadata files for RAG export."""
-        # Analyze document statistics
-        stats = {
-            "total_documents": len(documents),
-            "document_types": defaultdict(int),
-            "channels": len(channels),
-            "users": set(),
-            "date_range": {"earliest": None, "latest": None},
-            "content_types": defaultdict(int),
-            "avg_length": 0,
-            "has_code": 0,
-            "has_files": 0,
-            "threads": 0,
-        }
+    def _update_stats_incremental(self, stats: Dict, doc: Dict) -> None:
+        """Update statistics incrementally for streaming export."""
+        meta = doc["metadata"]
+        
+        stats["total_documents"] += 1
+        stats["document_types"][meta["type"]] += 1
+        stats["users"].add(meta.get("user", ""))
+        stats["content_types"][meta.get("content_type", "")] += 1
+        
+        if meta.get("has_code"):
+            stats["has_code"] += 1
+        if meta.get("has_files"):
+            stats["has_files"] += 1
+        if meta["type"] == "thread":
+            stats["threads"] += 1
+            
+        doc_len = meta.get("char_length", 0)
+        stats["total_length"] += doc_len
+        
+        # Track date range
+        doc_date = meta.get("datetime")
+        if doc_date:
+            if not stats["date_range"]["earliest"] or doc_date < stats["date_range"]["earliest"]:
+                stats["date_range"]["earliest"] = doc_date
+            if not stats["date_range"]["latest"] or doc_date > stats["date_range"]["latest"]:
+                stats["date_range"]["latest"] = doc_date
 
-        total_length = 0
-        for doc in documents:
-            meta = doc["metadata"]
-            stats["document_types"][meta["type"]] += 1
-            stats["users"].add(meta.get("user", ""))
-            stats["content_types"][meta.get("content_type", "")] += 1
-
-            if meta.get("has_code"):
-                stats["has_code"] += 1
-            if meta.get("has_files"):
-                stats["has_files"] += 1
-            if meta["type"] == "thread":
-                stats["threads"] += 1
-
-            doc_len = meta.get("char_length", 0)
-            total_length += doc_len
-
-            # Track date range
-            doc_date = meta.get("datetime")
-            if doc_date:
-                if not stats["date_range"]["earliest"] or doc_date < stats["date_range"]["earliest"]:
-                    stats["date_range"]["earliest"] = doc_date
-                if not stats["date_range"]["latest"] or doc_date > stats["date_range"]["latest"]:
-                    stats["date_range"]["latest"] = doc_date
-
-        stats["avg_length"] = total_length / len(documents) if documents else 0
+    def _finalize_stats(self, stats: Dict) -> None:
+        """Finalize statistics after streaming export."""
+        stats["avg_length"] = stats["total_length"] / stats["total_documents"] if stats["total_documents"] else 0
         stats["users"] = sorted(list(stats["users"]))
         stats["user_count"] = len(stats["users"])
-
+        
         # Convert defaultdicts to regular dicts for JSON serialization
         stats["document_types"] = dict(stats["document_types"])
         stats["content_types"] = dict(stats["content_types"])
 
+    def _write_rag_metadata_streaming(self, output_dir: str, stats: Dict, channels: List[Tuple[str, str]]) -> None:
+        """Write metadata files for RAG export using precomputed streaming stats."""
+        
         metadata = {
-            "export_type": "rag",
+            "export_type": "rag_streaming",
             "exported_at": datetime.now().isoformat(),
             "statistics": stats,
             "channels": [{"id": ch_id, "name": ch_name} for ch_id, ch_name in channels],
@@ -2330,15 +2158,40 @@ See summary.json for detailed statistics and channel information.
                 "thread_reconstruction": "Use 'thread_ts' to group related messages"
             }
         }
-
+        
         # Write metadata
         with open(os.path.join(output_dir, "rag_metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
-
+        
         # Write README for RAG usage
-        readme_content = f"""# Slack RAG Export
+        readme_content = f"""# Slack RAG Export (Memory-Efficient Streaming)
 
 This directory contains Slack conversations optimized for Retrieval Augmented Generation (RAG).
+
+**OPTIMIZED FOR TERABYTE-SCALE DATABASES**: This export uses streaming processing with configurable batch sizes to handle massive datasets with minimal memory overhead.
+
+**BOT MESSAGES FILTERED**: Bot messages are automatically filtered out as they contain no useful information for RAG.
+
+## Memory-Efficient Features
+
+- **Streaming Processing**: Documents are processed and written one-by-one, never loading entire datasets into memory
+- **Configurable Batch Size**: Use `--batch-size` to control memory usage (default: 1000 messages per batch)
+- **Progress Tracking**: Real-time progress updates for large channels
+- **Explicit Memory Management**: Automatic cleanup of processed data to prevent memory leaks
+- **Channel-by-Channel Processing**: Each channel is processed independently to maintain low memory footprint
+
+## Usage for Large Databases
+
+```bash
+# For very large databases (terabytes), use smaller batch sizes:
+python app.py --rag ./rag_export --batch-size 100
+
+# For systems with more RAM, you can use larger batches for faster processing:
+python app.py --rag ./rag_export --batch-size 5000
+
+# Default (balanced for most systems):
+python app.py --rag ./rag_export --batch-size 1000
+```
 
 ## Document Structure
 
@@ -2372,6 +2225,7 @@ Each document in `slack_rag_documents.jsonl` has this structure:
 - **Thread Summaries**: {stats['document_types'].get('thread', 0):,}
 - **Unique Users**: {stats['user_count']:,}
 - **Channels**: {stats['channels']:,}
+- **Bot Messages Filtered**: {stats['bot_messages_filtered']:,}
 - **Date Range**: {stats['date_range']['earliest'][:10] if stats['date_range']['earliest'] else 'N/A'} to {stats['date_range']['latest'][:10] if stats['date_range']['latest'] else 'N/A'}
 - **Avg Document Length**: {stats['avg_length']:.0f} characters
 - **Documents with Code**: {stats['has_code']:,}
@@ -2382,22 +2236,22 @@ Each document in `slack_rag_documents.jsonl` has this structure:
 ### Attribution Queries
 Find what specific people said about topics:
 ```
-Query: "What does Sarah think about product strategy?"
-Filter: metadata.user = "Sarah"
+Query: "What does Andrea think about product strategy?"
+Filter: metadata.user = "Andrea"
 ```
 
-### System/Technical Queries
+### System/Technical Queries  
 Find discussions about specific systems:
 ```
-Query: "System A interaction"
+Query: "Back Office ChartFinder interaction"
 Filter: metadata.content_type contains "technical_discussion"
 ```
 
 ### Expert Knowledge Queries
 Find expertise from specific people:
 ```
-Query: "SQL recommendations for lost records"
-Filter: metadata.user = "Samantha" AND metadata.has_code = true
+Query: "SQL recommendations for lost records"  
+Filter: metadata.user = "Josh" AND metadata.has_code = true
 ```
 
 ### Temporal Queries
@@ -2417,7 +2271,7 @@ Filter: metadata.importance_score >= 3.0
 This format works with most RAG frameworks:
 
 - **LangChain**: Use `JSONLinesLoader` to load documents
-- **LlamaIndex**: Use `JSONReader` with metadata support
+- **LlamaIndex**: Use `JSONReader` with metadata support  
 - **Haystack**: Use `JsonlDocumentStore`
 - **Chroma**: Load as documents with metadata
 - **Pinecone/Weaviate**: Use metadata for filtering
@@ -2429,7 +2283,7 @@ The export identifies these content types:
 
 See `rag_metadata.json` for complete statistics and schema information.
 """
-
+        
         with open(os.path.join(output_dir, "README.md"), "w", encoding="utf-8") as f:
             f.write(readme_content)
 
@@ -2447,10 +2301,7 @@ def parse_args() -> argparse.Namespace:
         nargs="?",
         help="Slack workspace subdomain (e.g. datavant.enterprise)",
     )
-    mode_group.add_argument(
-        "--axolotl",
-        help="Export database contents for Axolotl fine-tuning to the specified directory (basic format)",
-    )
+
     mode_group.add_argument(
         "--enhanced-export",
         help="Export with enhanced knowledge capture strategies to the specified directory",
@@ -2489,15 +2340,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument("--client-req-id", help="Client request ID for API calls")
     parser.add_argument("--browse-session-id", help="Browse session ID for API calls")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1000,
+        help="Batch size for processing messages during RAG export (default: 1000, lower values use less memory)",
+    )
 
     args = parser.parse_args()
 
     # For archive mode, validate required arguments
-    if not args.axolotl and not args.enhanced_export and not args.rag and not all(
+    if not args.enhanced_export and not args.rag and not all(
         [args.subdomain, args.org, args.x_version_timestamp, args.team, args.cookie]
     ):
         parser.error(
-            "When archiving (not using --axolotl, --enhanced-export, or --rag), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie"
+            "When archiving (not using --enhanced-export or --rag), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie"
         )
 
     return args
@@ -2537,19 +2394,14 @@ def main():
     db.connect()
 
     try:
-        if args.axolotl:
-            exporter = Exporter(db)
-            exporter.export_for_axolotl(args.axolotl)
-            return
-
         if args.enhanced_export:
             exporter = Exporter(db)
             exporter.export_for_comprehensive_training(args.enhanced_export, args.strategies)
             return
-
+        
         if args.rag:
             exporter = Exporter(db)
-            exporter.export_for_rag(args.rag)
+            exporter.export_for_rag(args.rag, include_thread_summaries=True, batch_size=args.batch_size)
             return
 
         config = create_slack_config(args)
