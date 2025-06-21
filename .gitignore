@@ -7,3 +7,5 @@ eng.emails
 *.gen
 slack-cache
 git.*
+commit_activity.png
+git_commits_cache*
