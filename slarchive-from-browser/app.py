@@ -648,6 +648,9 @@ def export_for_axolotl(db_conn, output_dir):
     total_conversations = 0
     max_conversation_size = 100  # Maximum messages per conversation
     
+    # Store channel filenames for dataset config
+    channel_files = []
+    
     # Create a dataset file for each channel
     for channel_id, channel_name in channels:
         try:
@@ -787,6 +790,12 @@ def export_for_axolotl(db_conn, output_dir):
             # Atomic move to final location
             shutil.move(temp_path, output_path)
             
+            # Store filename for dataset config
+            channel_files.append({
+                "path": output_path,
+                "type": "conversation"
+            })
+            
             total_conversations += len(axolotl_conversations)
             print(f"Exported {len(axolotl_conversations)} conversations from #{channel_name} to {output_path}")
             print(f"  - Average messages per conversation: {dataset['stats']['avg_messages_per_conversation']:.1f}")
@@ -809,13 +818,7 @@ def export_for_axolotl(db_conn, output_dir):
         
         # Create dataset config file for Axolotl
         dataset_config = {
-            "datasets": [
-                {
-                    "path": os.path.join(output_dir, f"{safe_name}_{channel_id}.json"),
-                    "type": "conversation"
-                }
-                for channel_id, channel_name in channels
-            ]
+            "datasets": channel_files
         }
         
         # Write metadata files atomically
@@ -841,21 +844,30 @@ def main():
     p = argparse.ArgumentParser(
         description="Archive Slack channels via in-browser endpoints"
     )
+    
+    # Create a mutually exclusive group for the two modes
+    mode_group = p.add_mutually_exclusive_group(required=True)
+    mode_group.add_argument(
+        "subdomain", nargs="?", help="Slack workspace subdomain (e.g. datavant.enterprise)"
+    )
+    mode_group.add_argument(
+        "--dump-axolotl",
+        help="Export database contents for Axolotl fine-tuning to the specified directory"
+    )
+    
+    # Add all other arguments as optional
     p.add_argument(
-        "subdomain", help="Slack workspace subdomain (e.g. datavant.enterprise)"
+        "--org", help="Which specific Slack org the cookie is signed into"
     )
     p.add_argument(
-        "--org", required=True, help="Which specific Slack org the cookie is signed into"
-    )
-    p.add_argument(
-        "--x-version-timestamp", required=True,
+        "--x-version-timestamp",
         help="X-Version-Timestamp from the Slack homepage"
     )
     p.add_argument(
-        "--team", required=True, help="Which specific Slack team the cookie is signed into"
+        "--team", help="Which specific Slack team the cookie is signed into"
     )
     p.add_argument(
-        "--cookie", required=True, help="Your full Slack session cookie string"
+        "--cookie", help="Your full Slack session cookie string"
     )
     p.add_argument(
         "--rate-limit",
@@ -872,10 +884,6 @@ def main():
         "--browse-session-id",
         help="Browse session ID for API calls"
     )
-    p.add_argument(
-        "--dump-axolotl",
-        help="Export database contents for Axolotl fine-tuning to the specified directory"
-    )
     args = p.parse_args()
 
     lvl = logging.DEBUG if args.verbose else logging.INFO
@@ -889,6 +897,10 @@ def main():
         export_for_axolotl(conn, args.dump_axolotl)
         conn.close()
         return
+
+    # For archive mode, validate required arguments
+    if not all([args.subdomain, args.org, args.x_version_timestamp, args.team, args.cookie]):
+        p.error("When archiving (not using --dump-axolotl), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie")
 
     base_url = f"https://{args.subdomain}.slack.com"
     # build session
