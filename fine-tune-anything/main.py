@@ -322,7 +322,7 @@ def train(args):
         model=model,
         args=train_args,
         train_dataset=dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
     )
     trainer.train()
     # Save LoRA weights
