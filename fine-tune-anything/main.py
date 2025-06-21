@@ -269,26 +269,26 @@ def parse_args():
     group.add_argument("--inference", action="store_true", help="Run in inference mode.")
 
     # Data and model arguments
-    parser.add_argument("--jsonl_file", type=str, help="Path to training data (jsonl) [Required for train]")
-    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save/load model or adapter.")
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen3-4B", help="Base model to use.")
+    parser.add_argument("--jsonl-file", type=str, help="Path to training data (jsonl) [Required for train]")
+    parser.add_argument("--output-dir", type=str, required=True, help="Directory to save/load model or adapter.")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-4B", help="Base model to use.")
 
     # Training arguments
     parser.add_argument("--epochs", type=int, default=3, help="Number of epochs (train mode).")
-    parser.add_argument("--max_length", type=int, default=1024, help="Max tokens per sample (train mode).")
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size per device.")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Gradient accumulation steps.")
-    parser.add_argument("--learning_rate", type=float, default=2e-4, help="Learning rate.")
+    parser.add_argument("--max-length", type=int, default=1024, help="Max tokens per sample (train mode).")
+    parser.add_argument("--batch-size", type=int, default=1, help="Batch size per device.")
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=8, help="Gradient accumulation steps.")
+    parser.add_argument("--learning-rate", type=float, default=2e-4, help="Learning rate.")
 
     # LoRA arguments
-    parser.add_argument("--lora_r", type=int, default=16, help="LoRA attention dimension.")
-    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha parameter.")
-    parser.add_argument("--lora_dropout", type=float, default=0.1, help="LoRA dropout.")
+    parser.add_argument("--lora-r", type=int, default=16, help="LoRA attention dimension.")
+    parser.add_argument("--lora-alpha", type=int, default=32, help="LoRA alpha parameter.")
+    parser.add_argument("--lora-dropout", type=float, default=0.1, help="LoRA dropout.")
 
     # Inference arguments
     parser.add_argument("--prompt", type=str, help="Prompt to run for inference mode.")
     parser.add_argument("--temperature", type=float, default=0.7, help="Temperature for inference.")
-    parser.add_argument("--max_new_tokens", type=int, default=256, help="Max new tokens for inference.")
+    parser.add_argument("--max-new-tokens", type=int, default=256, help="Max new tokens for inference.")
 
     return parser.parse_args()
 
