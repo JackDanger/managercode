@@ -42,6 +42,13 @@ class DatabaseManager:
     def connect(self) -> None:
         """Establish database connection and setup schema."""
         self.conn = sqlite3.connect(self.db_path)
+        
+        # Performance optimizations
+        self.conn.execute("PRAGMA journal_mode = WAL")  # Write-Ahead Logging for better concurrency
+        self.conn.execute("PRAGMA synchronous = NORMAL")  # Sync less often (1=NORMAL, 2=FULL, 0=OFF)
+        self.conn.execute("PRAGMA cache_size = 10000")  # Increase cache size (in pages)
+        self.conn.execute("PRAGMA temp_store = MEMORY")  # Store temp tables in memory
+        
         self._setup_schema()
 
     def close(self) -> None:
@@ -526,27 +533,40 @@ class MessageProcessor:
         messages_processed = 0
         latest_ts = None
         oldest_ts = None
+        
+        # Start a single transaction for the entire batch
+        self.db.conn.execute("BEGIN TRANSACTION")
+        
+        try:
+            for m in messages:
+                ts = m.get("ts")
+                if not ts:
+                    continue
 
-        for m in messages:
-            ts = m.get("ts")
-            if not ts:
-                continue
+                try:
+                    # Validate timestamp
+                    ts_float = float(ts)
+                    if latest_ts is None or ts_float > latest_ts:
+                        latest_ts = ts_float
+                    if oldest_ts is None or ts_float < oldest_ts:
+                        oldest_ts = ts_float
 
-            try:
-                # Validate timestamp
-                ts_float = float(ts)
-                if latest_ts is None or ts_float > latest_ts:
-                    latest_ts = ts_float
-                if oldest_ts is None or ts_float < oldest_ts:
-                    oldest_ts = ts_float
+                    # Store message
+                    self._store_message(channel_id, m)
+                    messages_processed += 1
 
-                # Store message
-                self._store_message(channel_id, m)
-                messages_processed += 1
-
-            except (ValueError, TypeError) as e:
-                logging.warning(f"Error processing message with ts={ts}: {e}")
-                continue
+                except (ValueError, TypeError) as e:
+                    logging.warning(f"Error processing message with ts={ts}: {e}")
+                    continue
+            
+            # Commit the batch of inserts
+            self.db.conn.commit()
+            
+        except Exception as e:
+            # Rollback on error
+            self.db.conn.rollback()
+            logging.error(f"Error processing message batch: {e}")
+            raise
 
         return messages_processed, latest_ts, oldest_ts
 
@@ -554,9 +574,21 @@ class MessageProcessor:
         """Store a single message in the database."""
         ts = message.get("ts")
 
+        data = json.dumps(message, separators=(",", ":"))
+        # Compress the data
+        compressed = self.db.compress_data(data)
+        original_size = len(data.encode("utf-8"))
+        compressed_size = len(compressed)
+
         # Store compressed data
-        self.db.store_compressed_data(
-            "messages", f"{channel_id}_{ts}", json.dumps(message, separators=(",", ":"))
+        comp_cur = self.db.conn.cursor()
+        comp_cur.execute(
+            """
+            INSERT OR REPLACE INTO compressed_data
+            (table_name, record_id, compressed_data, original_size, compressed_size, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """,
+            ("messages", f"{channel_id}_{ts}", compressed, original_size, compressed_size),
         )
 
         # Store message metadata
