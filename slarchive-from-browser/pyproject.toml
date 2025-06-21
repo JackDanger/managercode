@@ -1,0 +1,11 @@
+[project]
+name = "slarchive-from-browser"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "black>=25.1.0",
+    "ipython>=8.36.0",
+    "requests>=2.32.3",
+]
