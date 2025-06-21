@@ -46,38 +46,34 @@ def get_model_and_tokenizer(model_name, lora_config=None, lora_weights_path=None
         model = PeftModel.from_pretrained(model, lora_weights_path)
     return model, tokenizer
 
-def preprocess(example, tokenizer, max_length=1024):
-    """
-    Preprocess a single conversation to tokenized inputs/labels for CausalLM training.
-    Uses Qwen3 chat template with full conversation context.
-    """
-    messages = example.get("messages", [])
-    if not messages or len(messages) < 2:
-        # Return None values for filtering later
-        return {"input_ids": None, "attention_mask": None, "labels": None}
-
-    # Build full conversation with all turns
+def create_chunk_from_messages(messages, start_idx, end_idx, tokenizer, max_length):
+    """Create a training chunk from a subset of messages."""
+    chunk_messages = messages[start_idx:end_idx + 1]
+    
+    # Build conversation text
     conversation_parts = []
-    for msg in messages:
+    for msg in chunk_messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
         if role and content:
             conversation_parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
-
+    
     if not conversation_parts:
-        return {"input_ids": None, "attention_mask": None, "labels": None}
-
+        return None
+    
     full_text = "\n".join(conversation_parts)
-
-    # Find the last assistant response to determine where labels should start
+    
+    # Find the last assistant response in this chunk
     last_assistant_idx = None
-    for i, msg in enumerate(messages):
-        if msg.get("role") == "assistant":
+    for i in range(len(chunk_messages) - 1, -1, -1):
+        if chunk_messages[i].get("role") == "assistant":
             last_assistant_idx = i
-
+            break
+    
     if last_assistant_idx is None:
-        return {"input_ids": None, "attention_mask": None, "labels": None}
-
+        return None
+    
+    # Tokenize the full chunk
     tokenized = tokenizer(
         full_text,
         truncation=True,
@@ -85,36 +81,117 @@ def preprocess(example, tokenizer, max_length=1024):
         padding="max_length",
         return_tensors=None,
     )
-    input_ids = tokenized["input_ids"]
-
-    # Calculate where the last assistant response begins
-    # Build text up to last assistant response
+    
+    # Calculate context length (everything before the last assistant response)
     context_parts = []
-    for i, msg in enumerate(messages[:last_assistant_idx]):
+    for i, msg in enumerate(chunk_messages[:last_assistant_idx]):
         role = msg.get("role", "")
         content = msg.get("content", "")
         if role and content:
             context_parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
     context_parts.append(f"<|im_start|>assistant\n")
-
-    context_text = "\n".join(context_parts)
     
-    # Tokenize context with truncation to ensure it doesn't exceed max_length
+    context_text = "\n".join(context_parts)
     context_tokens = tokenizer(context_text, add_special_tokens=False, truncation=True, max_length=max_length)
     context_len = len(context_tokens["input_ids"])
     
-    # Skip if context alone fills the entire sequence (no room for assistant response)
-    if context_len >= max_length - 10:  # Leave at least 10 tokens for response
-        return {"input_ids": None, "attention_mask": None, "labels": None}
-    
-    # Create labels array with proper length from the start
-    labels = [-100] * len(input_ids)
-    # Only supervise tokens after the context
-    for i in range(context_len, len(input_ids)):
-        labels[i] = input_ids[i]
+    # Create labels - only supervise tokens after context
+    labels = [-100] * len(tokenized["input_ids"])
+    for i in range(context_len, len(tokenized["input_ids"])):
+        labels[i] = tokenized["input_ids"][i]
     
     tokenized["labels"] = labels
     return tokenized
+
+def preprocess_with_chunking(example, tokenizer, max_length=1024):
+    """
+    Preprocess a conversation, chunking it if necessary to fit within max_length.
+    Returns a list of training examples.
+    """
+    messages = example.get("messages", [])
+    if not messages or len(messages) < 2:
+        return []
+
+    # First, try to process the entire conversation
+    full_conversation_parts = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role and content:
+            full_conversation_parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+
+    if not full_conversation_parts:
+        return []
+
+    full_text = "\n".join(full_conversation_parts)
+    
+    # Check if the full conversation fits
+    full_tokenized = tokenizer(full_text, return_tensors=None, add_special_tokens=False)
+    
+    if len(full_tokenized["input_ids"]) <= max_length - 50:  # Leave some buffer
+        # Conversation fits, process normally
+        chunk = create_chunk_from_messages(messages, 0, len(messages) - 1, tokenizer, max_length)
+        return [chunk] if chunk else []
+    
+    # Conversation is too long, need to chunk it
+    chunks = []
+    assistant_indices = []
+    
+    # Find all assistant responses to use as chunk endpoints
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant":
+            assistant_indices.append(i)
+    
+    if not assistant_indices:
+        return []
+    
+    # Create chunks ending at each assistant response
+    start_idx = 0
+    for end_idx in assistant_indices:
+        # Try to include as much context as possible while staying under max_length
+        for context_start in range(start_idx, end_idx):
+            chunk_messages = messages[context_start:end_idx + 1]
+            
+            # Test if this chunk fits
+            test_parts = []
+            for msg in chunk_messages:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role and content:
+                    test_parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+            
+            test_text = "\n".join(test_parts)
+            test_tokens = tokenizer(test_text, return_tensors=None, add_special_tokens=False)
+            
+            if len(test_tokens["input_ids"]) <= max_length - 50:
+                # This chunk fits, create it
+                chunk = create_chunk_from_messages(messages, context_start, end_idx, tokenizer, max_length)
+                if chunk:
+                    chunks.append(chunk)
+                break
+        else:
+            # Even the minimal chunk (just the last user+assistant) is too long
+            # Create a chunk with just the last exchange
+            if end_idx > 0:
+                chunk = create_chunk_from_messages(messages, end_idx - 1, end_idx, tokenizer, max_length)
+                if chunk:
+                    chunks.append(chunk)
+        
+        # Move start forward, but keep some overlap for context
+        start_idx = max(start_idx, end_idx - 2)  # Keep last 2 messages for context
+    
+    return chunks
+
+def preprocess(example, tokenizer, max_length=1024):
+    """
+    Preprocess a single conversation, potentially creating multiple chunks.
+    This is a wrapper that returns the first chunk or None for compatibility.
+    """
+    chunks = preprocess_with_chunking(example, tokenizer, max_length)
+    if chunks:
+        return chunks[0]  # Return first chunk for now
+    else:
+        return {"input_ids": None, "attention_mask": None, "labels": None}
 
 def clean_memory():
     gc.collect()
@@ -157,20 +234,49 @@ def train(args):
     # Clean memory before training
     clean_memory()
 
-    # 4. Preprocess dataset
-    def _preprocess(example):
-        return preprocess(example, tokenizer, max_length=args.max_length)
+    # 4. Preprocess dataset with chunking
+    def _preprocess_with_expansion(examples):
+        """Process examples and expand chunks into separate examples."""
+        all_chunks = []
+        
+        for example in examples["messages"]:  # examples is a batch
+            example_dict = {"messages": example}
+            chunks = preprocess_with_chunking(example_dict, tokenizer, max_length=args.max_length)
+            all_chunks.extend(chunk for chunk in chunks if chunk is not None)
+        
+        if not all_chunks:
+            # Return empty structure if no valid chunks
+            return {
+                "input_ids": [],
+                "attention_mask": [],
+                "labels": []
+            }
+        
+        # Combine all chunks
+        return {
+            "input_ids": [chunk["input_ids"] for chunk in all_chunks],
+            "attention_mask": [chunk["attention_mask"] for chunk in all_chunks],
+            "labels": [chunk["labels"] for chunk in all_chunks]
+        }
     
-    print(f"\nPreprocessing dataset with max_length={args.max_length}...")
-    dataset = dataset.map(_preprocess, remove_columns=dataset.column_names)
-    
-    # Filter out empty examples
+    print(f"\nPreprocessing dataset with chunking, max_length={args.max_length}...")
     original_len = len(dataset)
-    dataset = dataset.filter(lambda x: x["input_ids"] is not None)
-    filtered_len = len(dataset)
     
-    if filtered_len < original_len:
-        print(f"Filtered out {original_len - filtered_len} examples (likely due to context length constraints)")
+    # Process in batches to handle chunking
+    dataset = dataset.map(
+        _preprocess_with_expansion, 
+        batched=True,
+        batch_size=100,  # Process in smaller batches to avoid memory issues
+        remove_columns=dataset.column_names
+    )
+    
+    # Filter out any remaining empty examples
+    dataset = dataset.filter(lambda x: len(x["input_ids"]) > 0)
+    
+    processed_len = len(dataset)
+    print(f"Processed {original_len} conversations into {processed_len} training examples")
+    if processed_len > original_len:
+        print(f"Created {processed_len - original_len} additional examples through chunking")
 
     # Validate and show dataset info
     if len(dataset) == 0:
@@ -297,7 +403,7 @@ if __name__ == "__main__":
     args = parse_args()
     if args.train:
         if not args.jsonl_file:
-            raise ValueError("You must provide --jsonl_file for training mode.")
+            raise ValueError("You must provide --jsonl-file for training mode.")
         train(args)
     elif args.inference:
         if not args.prompt:
