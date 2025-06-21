@@ -489,7 +489,7 @@ def fetch_channel_history(session, base_url, token, db_conn, rate_limit, verbose
         raise
 
 
-def fetch_all_users(session, base_url, token, rate_limit, verbose, db_conn):
+def fetch_all_users(session, org_id, token, rate_limit, verbose, db_conn):
     """Fetch all users from Slack, handling pagination."""
     cur = db_conn.cursor()
     marker = None
@@ -500,7 +500,7 @@ def fetch_all_users(session, base_url, token, rate_limit, verbose, db_conn):
     while True:
         try:
             # Prepare the request
-            url = f"{base_url}/cache/{token}/users/list"
+            url = f"https://edgeapi.slack.com/cache/{org_id}/users/list"
             params = {
                 "_x_app_name": "client",
                 "fp": "c7",
@@ -509,6 +509,7 @@ def fetch_all_users(session, base_url, token, rate_limit, verbose, db_conn):
             
             data = {
                 "token": token,
+                "count": 1000,
                 "present_first": True,
                 "enterprise_token": token
             }
@@ -535,12 +536,13 @@ def fetch_all_users(session, base_url, token, rate_limit, verbose, db_conn):
             if verbose:
                 logging.debug(f"POST {url}  marker={marker}")
             
+            # print_curl_command("POST", url, headers, params=params, data=data, session_headers=session.headers)
             r = session.post(url, params=params, headers=headers, json=data)
             r.raise_for_status()
             j = r.json()
             
             # Process users
-            users = j.get("users", [])
+            users = j.get("results", [])
             if verbose:
                 logging.debug(f"Got {len(users)} users")
             
@@ -900,7 +902,7 @@ def main():
     token = extract_token(session, base_url, args.verbose)
 
     # Fetch all users first
-    fetch_all_users(session, base_url, token, args.rate_limit, args.verbose, conn)
+    fetch_all_users(session, args.org, token, args.rate_limit, args.verbose, conn)
 
     # Enumerate channels
     fetch_all_channels(
