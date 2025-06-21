@@ -582,7 +582,7 @@ class ChannelManager:
             'Content-Disposition: form-data; name="max_filter_suggestions"'
         )
         form_data.append("")
-        form_data.append("10")
+        form_data.append("1000")
 
         form_data.append(f"--{boundary}")
         form_data.append('Content-Disposition: form-data; name="sort"')
@@ -604,10 +604,10 @@ class ChannelManager:
         form_data.append("")
         form_data.append("0")
 
-        form_data.append(f"--{boundary}")
-        form_data.append('Content-Disposition: form-data; name="search_only_team"')
-        form_data.append("")
-        form_data.append(self.slack.config.team_id)
+        # form_data.append(f"--{boundary}")
+        # form_data.append('Content-Disposition: form-data; name="search_only_team"')
+        # form_data.append("")
+        # form_data.append(self.slack.config.team_id)
 
         form_data.append(f"--{boundary}")
         form_data.append(
@@ -1217,40 +1217,286 @@ class UserManager:
 
 
 class Exporter:
-    """Handles data export operations."""
+    """Handles data export operations for LLM fine-tuning."""
 
+    MAX_CONTEXT_MESSAGES = 10  # Maximum number of messages to include in context
+    MAX_TOKENS_PER_CONVERSATION = 2048  # Approximate max tokens per conversation
+    
     def __init__(self, db: DatabaseManager):
         self.db = db
 
+    def _get_all_channels(self) -> List[Tuple[str, str]]:
+        """Get all channels from the database."""
+        cur = self.db.conn.cursor()
+        cur.execute("SELECT id, name FROM channels ORDER BY name")
+        return cur.fetchall()
+
+    def _get_thread_messages(self, channel_id: str, thread_ts: str) -> List[Dict]:
+        """Get all messages in a thread."""
+        cur = self.db.conn.cursor()
+        cur.execute(
+            """
+            SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.client_msg_id,
+                   m.edited_ts, m.edited_user, m.reply_count, m.reply_users_count,
+                   m.latest_reply, m.is_locked, m.has_files, m.has_blocks
+            FROM messages m
+            WHERE m.channel_id = ? AND m.thread_ts = ?
+            ORDER BY m.ts
+        """,
+            (channel_id, thread_ts),
+        )
+        thread_messages = []
+        for msg in cur.fetchall():
+            ts = msg[0]
+            raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
+            if raw_data:
+                thread_messages.append(json.loads(raw_data))
+        return thread_messages
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Roughly estimate the number of tokens in a text."""
+        # Very rough approximation: 4 characters per token
+        return len(text) // 4
+
+    def _format_message(self, msg: Dict, user_name: str, include_reactions: bool = True) -> str:
+        """Format a single message with user and content."""
+        text = msg.get("text", "").strip()
+        
+        # Add any file information
+        files = msg.get("files", [])
+        if files:
+            file_info = [f"[Shared file: {f.get('name', 'unnamed')}]" for f in files]
+            text += "\n" + "\n".join(file_info)
+
+        # Add reactions if present and requested
+        if include_reactions and msg.get("reactions"):
+            reaction_text = []
+            for reaction in msg["reactions"]:
+                count = reaction.get("count", 0)
+                users = reaction.get("users", [])
+                if count and users:
+                    reaction_text.append(f":{reaction['name']}: × {count}")
+            if reaction_text:
+                text += "\n[Reactions: " + " ".join(reaction_text) + "]"
+
+        # Format edited information
+        if msg.get("edited"):
+            text += f"\n[edited by {self.db.get_user_display_name(msg['edited']['user'])}]"
+
+        return f"{user_name}: {text}"
+
+    def _process_channel_conversations(self, channel_id: str, channel_name: str) -> List[Dict]:
+        """Process channel messages into coherent conversation chunks for fine-tuning."""
+        cur = self.db.conn.cursor()
+        cur.execute(
+            """
+            SELECT m.ts, m.user_id, m.thread_ts, m.subtype
+            FROM messages m
+            WHERE m.channel_id = ?
+            ORDER BY m.ts
+        """,
+            (channel_id,),
+        )
+        
+        conversations = []
+        current_conversation = {
+            "channel": channel_name,
+            "messages": [],
+            "token_count": 0
+        }
+        
+        last_ts = None
+        time_gap_threshold = 3600 * 24 # 1 day in seconds
+
+        for msg_row in cur.fetchall():
+            ts, user_id, thread_ts, subtype = msg_row
+            
+            # Skip system messages
+            if subtype in ["channel_join", "channel_leave", "bot_message"]:
+                continue
+
+            # Get the full message data
+            raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
+            if not raw_data:
+                continue
+
+            msg_data = json.loads(raw_data)
+            user_name = self.db.get_user_display_name(user_id)
+            
+            # Format the message
+            formatted_msg = self._format_message(msg_data, user_name)
+            msg_tokens = self._estimate_tokens(formatted_msg)
+
+            # Check if this is a thread starter
+            if not thread_ts and msg_data.get("reply_count", 0) > 0:
+                # Get thread messages
+                thread_msgs = self._get_thread_messages(channel_id, ts)
+                thread_text = "\n".join([
+                    self._format_message(
+                        tm, 
+                        self.db.get_user_display_name(tm.get("user")),
+                        include_reactions=False
+                    )
+                    for tm in thread_msgs
+                ])
+                formatted_msg += f"\n[Thread responses:\n{thread_text}\n]"
+                msg_tokens = self._estimate_tokens(formatted_msg)
+
+            # Start a new conversation if:
+            # 1. Adding this message would exceed token limit
+            # 2. Time gap is too large
+            # 3. Current conversation already has max messages
+            if (current_conversation["token_count"] + msg_tokens > self.MAX_TOKENS_PER_CONVERSATION or
+                (last_ts and float(ts) - float(last_ts) > time_gap_threshold) or
+                len(current_conversation["messages"]) >= self.MAX_CONTEXT_MESSAGES):
+                
+                if current_conversation["messages"]:
+                    conversations.append(current_conversation)
+                current_conversation = {
+                    "channel": channel_name,
+                    "messages": [],
+                    "token_count": 0
+                }
+
+            # Add message to current conversation
+            current_conversation["messages"].append({
+                "timestamp": ts,
+                "user": user_name,
+                "content": formatted_msg
+            })
+            current_conversation["token_count"] += msg_tokens
+            last_ts = ts
+
+        # Add the last conversation if it has messages
+        if current_conversation["messages"]:
+            conversations.append(current_conversation)
+
+        return conversations
+
+    def _write_channel_file(self, channel_id: str, channel_name: str, conversations: List[Dict], output_dir: str) -> str:
+        """Write channel conversations to a file in a format suitable for fine-tuning."""
+        output_path = os.path.join(output_dir, f"{channel_name}.jsonl")
+        with open(output_path, "w", encoding="utf-8") as f:
+            for conv in conversations:
+                # Format for axolotl fine-tuning
+                formatted_conv = {
+                    "conversations": [
+                        {
+                            "role": "system",
+                            "content": "You are a helpful AI assistant that understands Slack conversations and can answer questions about them."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Channel: #{conv['channel']}\n\n" + "\n".join(msg["content"] for msg in conv["messages"])
+                        },
+                        {
+                            "role": "assistant",
+                            "content": "I understand the conversation and can answer questions about its content, participants, and key points discussed."
+                        }
+                    ]
+                }
+                f.write(json.dumps(formatted_conv, ensure_ascii=False) + "\n")
+        return output_path
+
+    def _write_metadata_files(self, output_dir: str, total_conversations: int, channels: List[Tuple[str, str]], channel_files: List[Dict]) -> None:
+        """Write metadata files for the export."""
+        summary = {
+            "total_conversations": total_conversations,
+            "total_channels": len(channels),
+            "channels": [{"id": ch_id, "name": ch_name} for ch_id, ch_name in channels],
+            "files": channel_files,
+            "exported_at": datetime.now().isoformat(),
+            "format_info": {
+                "max_context_messages": self.MAX_CONTEXT_MESSAGES,
+                "max_tokens_per_conversation": self.MAX_TOKENS_PER_CONVERSATION,
+                "format": "instruction-input-output pairs with metadata",
+                "instruction_template": "Given the following Slack conversation...",
+                "usage_notes": [
+                    "Each conversation is limited to prevent context window overflow",
+                    "Threads are included with their parent messages",
+                    "System messages are filtered out",
+                    "Reactions and edits are preserved as contextual information",
+                    "File shares are noted but content is not included"
+                ]
+            }
+        }
+
+        with open(os.path.join(output_dir, "summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+
+        # Write a README with usage instructions
+        readme_content = f"""# Slack Conversation Training Data
+
+This directory contains Slack conversations exported for LLM fine-tuning.
+
+## Format
+
+Each .jsonl file contains conversations from a single channel, formatted as instruction-input-output pairs:
+
+```json
+{{
+    "instruction": "Given the following Slack conversation...",
+    "input": "Channel: #channel-name\\nuser1: message1\\nuser2: message2...",
+    "output": "I understand the conversation...",
+    "metadata": {{...}}
+}}
+```
+
+## Usage Notes
+
+- Maximum context size: {self.MAX_TOKENS_PER_CONVERSATION} tokens per conversation
+- Maximum messages per context: {self.MAX_CONTEXT_MESSAGES}
+- Conversations are split based on:
+  - Token limit
+  - Time gaps (>1 hour)
+  - Message count
+- Thread responses are included with their parent messages
+- Reactions and edits are preserved as contextual information
+
+## Statistics
+
+- Total conversations: {total_conversations:,}
+- Total channels: {len(channels):,}
+- Export date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+See summary.json for detailed statistics and channel information.
+"""
+        with open(os.path.join(output_dir, "README.md"), "w", encoding="utf-8") as f:
+            f.write(readme_content)
+
     def export_for_axolotl(self, output_dir: str) -> None:
-        """Export database contents for Axolotl fine-tuning."""
+        """Export database contents in a format suitable for LLM fine-tuning."""
         os.makedirs(output_dir, exist_ok=True)
 
         channels = self._get_all_channels()
         channel_files = []
         total_conversations = 0
 
+        print(f"\nExporting {len(channels)} channels to {output_dir}...")
+
         for channel_id, channel_name in channels:
             try:
-                conversations = self._process_channel_conversations(
-                    channel_id, channel_name
-                )
+                print(f"Processing channel #{channel_name}...")
+                conversations = self._process_channel_conversations(channel_id, channel_name)
                 if not conversations:
+                    print(f"  No conversations found in #{channel_name}")
                     continue
 
-                output_path = self._write_channel_file(
-                    channel_id, channel_name, conversations, output_dir
-                )
-                channel_files.append({"path": output_path, "type": "conversation"})
+                output_path = self._write_channel_file(channel_id, channel_name, conversations, output_dir)
+                channel_files.append({
+                    "path": output_path,
+                    "type": "conversation",
+                    "conversation_count": len(conversations)
+                })
                 total_conversations += len(conversations)
+                print(f"  Exported {len(conversations)} conversations")
 
             except Exception as e:
                 logging.error(f"Error processing channel {channel_name}: {str(e)}")
                 continue
 
-        self._write_metadata_files(
-            output_dir, total_conversations, channels, channel_files
-        )
+        self._write_metadata_files(output_dir, total_conversations, channels, channel_files)
+        print(f"\nExport complete: {total_conversations:,} conversations from {len(channels)} channels")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1267,7 +1513,7 @@ def parse_args() -> argparse.Namespace:
         help="Slack workspace subdomain (e.g. datavant.enterprise)",
     )
     mode_group.add_argument(
-        "--dump-axolotl",
+        "--axolotl",
         help="Export database contents for Axolotl fine-tuning to the specified directory",
     )
 
@@ -1295,11 +1541,11 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     # For archive mode, validate required arguments
-    if not args.dump_axolotl and not all(
+    if not args.axolotl and not all(
         [args.subdomain, args.org, args.x_version_timestamp, args.team, args.cookie]
     ):
         parser.error(
-            "When archiving (not using --dump-axolotl), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie"
+            "When archiving (not using --axolotl), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie"
         )
 
     return args
@@ -1339,9 +1585,9 @@ def main():
     db.connect()
 
     try:
-        if args.dump_axolotl:
+        if args.axolotl:
             exporter = Exporter(db)
-            exporter.export_for_axolotl(args.dump_axolotl)
+            exporter.export_for_axolotl(args.axolotl)
             return
 
         config = create_slack_config(args)
@@ -1352,8 +1598,8 @@ def main():
         channel_manager = ChannelManager(db, slack)
         message_manager = MessageManager(db, slack)
 
-        # user_manager.fetch_all_users()
-        # channel_manager.fetch_all_channels()
+        user_manager.fetch_all_users()
+        channel_manager.fetch_all_channels()
         message_manager.sync_all_channels()
 
         logging.info("Done! Archive stored in %s", DB_PATH)
