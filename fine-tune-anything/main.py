@@ -21,7 +21,7 @@ def get_model_and_tokenizer(model_name, lora_config=None, lora_weights_path=None
     if load_in_4bit:
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_compute_dtype=torch.float16,  # Match model dtype
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4"
         )
@@ -97,11 +97,21 @@ def preprocess(example, tokenizer, max_length=1024):
     context_parts.append(f"<|im_start|>assistant\n")
 
     context_text = "\n".join(context_parts)
-    context_len = len(tokenizer(context_text, add_special_tokens=False)["input_ids"])
-
-    # Only supervise assistant responses
-    labels = [-100] * context_len + input_ids[context_len:]
-    labels = labels[:max_length]
+    
+    # Tokenize context with truncation to ensure it doesn't exceed max_length
+    context_tokens = tokenizer(context_text, add_special_tokens=False, truncation=True, max_length=max_length)
+    context_len = len(context_tokens["input_ids"])
+    
+    # Skip if context alone fills the entire sequence (no room for assistant response)
+    if context_len >= max_length - 10:  # Leave at least 10 tokens for response
+        return {}
+    
+    # Create labels array with proper length from the start
+    labels = [-100] * len(input_ids)
+    # Only supervise tokens after the context
+    for i in range(context_len, len(input_ids)):
+        labels[i] = input_ids[i]
+    
     tokenized["labels"] = labels
     return tokenized
 
@@ -149,12 +159,21 @@ def train(args):
     # 4. Preprocess dataset
     def _preprocess(example):
         return preprocess(example, tokenizer, max_length=args.max_length)
+    
+    print(f"\nPreprocessing dataset with max_length={args.max_length}...")
     dataset = dataset.map(_preprocess, remove_columns=dataset.column_names)
+    
+    # Filter out empty examples
+    original_len = len(dataset)
     dataset = dataset.filter(lambda x: "input_ids" in x and x["input_ids"] is not None)
+    filtered_len = len(dataset)
+    
+    if filtered_len < original_len:
+        print(f"Filtered out {original_len - filtered_len} examples (likely due to context length constraints)")
 
     # Validate and show dataset info
     if len(dataset) == 0:
-        raise ValueError("No valid examples found after preprocessing. Check your data format.")
+        raise ValueError("No valid examples found after preprocessing. Check your data format or increase max_length.")
 
     print(f"\nDataset info after preprocessing:")
     print(f"- Number of examples: {len(dataset)}")
@@ -165,6 +184,13 @@ def train(args):
         sample = dataset[0]
         print(f"\nSample tokenized length: {len(sample['input_ids'])}")
         print(f"Number of supervised tokens: {sum(1 for label in sample['labels'] if label != -100)}")
+        
+        # Additional validation
+        assert len(sample['input_ids']) == len(sample['labels']), "Input and label lengths mismatch"
+        assert len(sample['input_ids']) <= args.max_length, f"Sample exceeds max_length: {len(sample['input_ids'])} > {args.max_length}"
+
+    # Clean memory before training
+    clean_memory()
 
     # 5. Training args
     train_args = TrainingArguments(
@@ -251,7 +277,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=3, help="Number of epochs (train mode).")
     parser.add_argument("--max_length", type=int, default=1024, help="Max tokens per sample (train mode).")
     parser.add_argument("--batch_size", type=int, default=1, help="Batch size per device.")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=16, help="Gradient accumulation steps.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8, help="Gradient accumulation steps.")
     parser.add_argument("--learning_rate", type=float, default=2e-4, help="Learning rate.")
 
     # LoRA arguments
