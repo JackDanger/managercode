@@ -38,6 +38,7 @@ class DatabaseManager:
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
         self.conn = None
+        self.usernames = {}
 
     def connect(self) -> None:
         """Establish database connection and setup schema."""
@@ -61,6 +62,9 @@ class DatabaseManager:
         if not user_id:
             return "Unknown"
 
+        if user_id in self.usernames:
+            return self.usernames[user_id]
+
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -78,7 +82,9 @@ class DatabaseManager:
         real_name, display_name, name = row
 
         # Return the first non-empty name in order of preference
-        return display_name or real_name or name or f"<@{user_id}>"
+        value = display_name or real_name or name or f"<@{user_id}>"
+        self.usernames[user_id] = value
+        return value
 
     def _setup_schema(self) -> None:
         """Create database tables if they don't exist."""
