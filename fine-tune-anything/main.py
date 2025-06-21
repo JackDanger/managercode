@@ -714,15 +714,22 @@ class FineTuner:
     """Manages the fine-tuning process."""
 
     def __init__(
-        self, model_manager: ModelManager, training_config: TrainingConfiguration
+        self, model_manager: ModelManager, training_config: TrainingConfiguration, 
+        resume_from_checkpoint: bool = True
     ):
         self.model_manager = model_manager
         self.training_config = training_config
+        self.resume_from_checkpoint = resume_from_checkpoint
 
     def train(self, dataset: Dataset, callbacks: Optional[List[TrainerCallback]] = None):
         """Execute the training process."""
         training_args = self._create_training_arguments()
 
+        # Check for existing checkpoints
+        checkpoint_dir = None
+        if self.resume_from_checkpoint:
+            checkpoint_dir = self._find_latest_checkpoint()
+        
         trainer = Trainer(
             model=self.model_manager.model,
             args=training_args,
@@ -731,12 +738,45 @@ class FineTuner:
             callbacks=callbacks,
         )
 
-        trainer.train()
+        # Resume from checkpoint if found
+        if checkpoint_dir:
+            print(f"\n{'='*80}")
+            print(f"Found checkpoint: {checkpoint_dir}")
+            print(f"Resuming training from checkpoint...")
+            print(f"{'='*80}\n")
+            trainer.train(resume_from_checkpoint=checkpoint_dir)
+        else:
+            print("\nStarting training from scratch...")
+            trainer.train()
+            
         self._save_results()
 
         # Cleanup
         del trainer
         MemoryManager.cleanup()
+    
+    def _find_latest_checkpoint(self) -> Optional[str]:
+        """Find the latest checkpoint in the output directory."""
+        output_path = Path(self.training_config.output_dir)
+        if not output_path.exists():
+            return None
+        
+        # Look for checkpoint directories (format: checkpoint-STEP)
+        checkpoints = []
+        for item in output_path.iterdir():
+            if item.is_dir() and item.name.startswith("checkpoint-"):
+                try:
+                    step = int(item.name.split("-")[1])
+                    checkpoints.append((step, str(item)))
+                except (IndexError, ValueError):
+                    continue
+        
+        if not checkpoints:
+            return None
+        
+        # Return the checkpoint with the highest step number
+        checkpoints.sort(key=lambda x: x[0], reverse=True)
+        return checkpoints[0][1]
 
     def _create_training_arguments(self) -> TrainingArguments:
         """Create training arguments from configuration."""
@@ -915,7 +955,11 @@ class FineTuningApplication:
             )
             callbacks.append(inference_callback)
 
-        fine_tuner = FineTuner(self.model_manager, training_config)
+        fine_tuner = FineTuner(
+            self.model_manager, 
+            training_config,
+            resume_from_checkpoint=not self.args.no_resume
+        )
         fine_tuner.train(processed_dataset, callbacks=callbacks if callbacks else None)
 
     def run_inference(self):
@@ -1008,6 +1052,11 @@ def parse_arguments():
         "--no-cache",
         action="store_true",
         help="Force dataset reprocessing, ignoring any cached version.",
+    )
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Start training from scratch, ignoring any existing checkpoints.",
     )
     parser.add_argument(
         "--gradient-accumulation-steps",
