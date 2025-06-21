@@ -14,6 +14,7 @@ from transformers import (
     AutoTokenizer,
     TrainingArguments,
     Trainer,
+    TrainerCallback,
     pipeline,
     BitsAndBytesConfig,
 )
@@ -621,6 +622,94 @@ class DatasetCache:
         print("Cache cleared")
 
 
+class PeriodicInferenceCallback(TrainerCallback):
+    """Callback to run inference on a test prompt periodically during training."""
+    
+    def __init__(self, model_manager: ModelManager, test_prompt: str, 
+                 inference_steps: int, inference_config: InferenceConfiguration):
+        self.model_manager = model_manager
+        self.test_prompt = test_prompt
+        self.inference_steps = inference_steps
+        self.inference_config = inference_config
+        self.initial_response = None
+    
+    def on_step_end(self, args, state, control, **kwargs):
+        """Run inference every N steps."""
+        if state.global_step % self.inference_steps == 0 and state.global_step > 0:
+            self._run_inference(state.global_step, kwargs.get("logs", {}))
+    
+    def on_train_begin(self, args, state, control, **kwargs):
+        """Run initial inference to establish baseline."""
+        print("\n" + "="*80)
+        print("Running initial inference to establish baseline...")
+        print("="*80)
+        self.initial_response = self._run_inference(0, {})
+    
+    def _run_inference(self, step: int, logs: Dict[str, float]) -> str:
+        """Run inference and print results."""
+        # Save the training mode
+        training_mode = self.model_manager.model.training
+        self.model_manager.model.eval()
+        
+        try:
+            # Format prompt
+            messages = [{"role": "user", "content": self.test_prompt}]
+            formatted_prompt = self.model_manager.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            
+            # Generate response
+            with torch.no_grad():
+                inputs = self.model_manager.tokenizer(
+                    formatted_prompt, 
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=2048  # Use a reasonable max length for the input
+                ).to(self.model_manager.model.device)
+                
+                outputs = self.model_manager.model.generate(
+                    **inputs,
+                    max_new_tokens=self.inference_config.max_new_tokens,
+                    temperature=self.inference_config.temperature,
+                    top_p=self.inference_config.top_p,
+                    do_sample=True,
+                    pad_token_id=self.model_manager.tokenizer.pad_token_id,
+                    eos_token_id=self.model_manager.tokenizer.eos_token_id,
+                )
+                
+                response = self.model_manager.tokenizer.decode(
+                    outputs[0], skip_special_tokens=True
+                )
+                
+                # Extract only the generated part
+                if formatted_prompt in response:
+                    response = response[len(formatted_prompt):].strip()
+            
+            # Print results
+            print(f"\n{'='*80}")
+            print(f"Inference at step {step}")
+            if logs:
+                loss = logs.get('loss', 'N/A')
+                print(f"Current loss: {loss}")
+            print(f"{'='*80}")
+            print(f"Prompt: {self.test_prompt}")
+            print(f"{'-'*40}")
+            print(f"Response: {response}")
+            
+            if step == 0:
+                print(f"{'-'*40}")
+                print("(This is the baseline response before training)")
+            
+            print(f"{'='*80}\n")
+            
+            return response
+            
+        finally:
+            # Restore training mode
+            if training_mode:
+                self.model_manager.model.train()
+
+
 class FineTuner:
     """Manages the fine-tuning process."""
 
@@ -630,7 +719,7 @@ class FineTuner:
         self.model_manager = model_manager
         self.training_config = training_config
 
-    def train(self, dataset: Dataset):
+    def train(self, dataset: Dataset, callbacks: Optional[List[TrainerCallback]] = None):
         """Execute the training process."""
         training_args = self._create_training_arguments()
 
@@ -639,6 +728,7 @@ class FineTuner:
             args=training_args,
             train_dataset=dataset,
             processing_class=self.model_manager.tokenizer,
+            callbacks=callbacks,
         )
 
         trainer.train()
@@ -805,8 +895,28 @@ class FineTuningApplication:
             max_sequence_length=self.args.max_length,
         )
 
+        # Setup callbacks
+        callbacks = []
+        if self.args.eval_prompt:
+            print(f"\nPeriodic inference enabled:")
+            print(f"- Evaluation prompt: {self.args.eval_prompt}")
+            print(f"- Evaluation frequency: every {self.args.eval_steps} steps")
+            
+            inference_config = InferenceConfiguration(
+                max_new_tokens=self.args.max_new_tokens,
+                temperature=self.args.temperature
+            )
+            
+            inference_callback = PeriodicInferenceCallback(
+                model_manager=self.model_manager,
+                test_prompt=self.args.eval_prompt,
+                inference_steps=self.args.eval_steps,
+                inference_config=inference_config
+            )
+            callbacks.append(inference_callback)
+
         fine_tuner = FineTuner(self.model_manager, training_config)
-        fine_tuner.train(processed_dataset)
+        fine_tuner.train(processed_dataset, callbacks=callbacks if callbacks else None)
 
     def run_inference(self):
         """Execute the inference workflow."""
@@ -925,6 +1035,19 @@ def parse_arguments():
     )
     parser.add_argument(
         "--max-new-tokens", type=int, default=256, help="Max new tokens for inference."
+    )
+    
+    # Training inference monitoring
+    parser.add_argument(
+        "--eval-prompt", 
+        type=str, 
+        help="Prompt to evaluate during training (optional). If provided, will run inference every N steps."
+    )
+    parser.add_argument(
+        "--eval-steps", 
+        type=int, 
+        default=50,
+        help="Number of training steps between evaluation prompts (default: 50)."
     )
 
     return parser.parse_args()
