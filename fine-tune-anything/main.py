@@ -473,6 +473,10 @@ class DatasetProcessingConfig:
     model_name: str
     max_length: int
     dataset_batch_size: int
+    
+    def __post_init__(self):
+        # Convert to absolute path for consistent hashing
+        self.jsonl_file = str(Path(self.jsonl_file).resolve())
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for hashing."""
@@ -524,12 +528,17 @@ class DatasetCache:
         """Retrieve cached dataset if it exists and is valid."""
         try:
             # Compute dataset file hash
+            print(f"\nChecking cache for dataset: {config.jsonl_file}")
             dataset_hash = self._compute_dataset_hash(config.jsonl_file)
             cache_key = self._compute_cache_key(config, dataset_hash)
+            print(f"Cache key: {cache_key[:16]}...")
 
             # Check if cache exists
             metadata = self._load_metadata()
+            print(f"Found {len(metadata)} cached entries")
+            
             if cache_key not in metadata:
+                print("No matching cache entry found")
                 return None
 
             cache_info = metadata[cache_key]
@@ -551,21 +560,25 @@ class DatasetCache:
 
         except Exception as e:
             print(f"Error loading cached dataset: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def save_dataset(self, dataset: Dataset, config: DatasetProcessingConfig):
         """Save processed dataset to cache."""
         try:
             # Compute cache key
+            print(f"\nPreparing to cache dataset from: {config.jsonl_file}")
             dataset_hash = self._compute_dataset_hash(config.jsonl_file)
             cache_key = self._compute_cache_key(config, dataset_hash)
+            print(f"Cache key: {cache_key[:16]}...")
 
             # Generate unique filename for this cache
             cache_filename = f"dataset_cache_{cache_key[:16]}"
             cache_path = self.cache_dir / cache_filename
 
             # Save dataset
-            print(f"\nSaving processed dataset to cache: {cache_path}")
+            print(f"Saving processed dataset to cache: {cache_path}")
             dataset.save_to_disk(str(cache_path))
 
             # Update metadata
@@ -581,9 +594,12 @@ class DatasetCache:
             self._save_metadata(metadata)
 
             print(f"Dataset cached successfully")
+            print(f"Metadata saved to: {self.metadata_file}")
 
         except Exception as e:
             print(f"Error saving dataset to cache: {e}")
+            import traceback
+            traceback.print_exc()
 
     def clear_cache(self):
         """Clear all cached datasets."""
