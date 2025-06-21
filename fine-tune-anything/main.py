@@ -53,7 +53,8 @@ def preprocess(example, tokenizer, max_length=1024):
     """
     messages = example.get("messages", [])
     if not messages or len(messages) < 2:
-        return {}  # Filter out incomplete conversations
+        # Return None values for filtering later
+        return {"input_ids": None, "attention_mask": None, "labels": None}
 
     # Build full conversation with all turns
     conversation_parts = []
@@ -64,7 +65,7 @@ def preprocess(example, tokenizer, max_length=1024):
             conversation_parts.append(f"<|im_start|>{role}\n{content}<|im_end|>")
 
     if not conversation_parts:
-        return {}
+        return {"input_ids": None, "attention_mask": None, "labels": None}
 
     full_text = "\n".join(conversation_parts)
 
@@ -75,7 +76,7 @@ def preprocess(example, tokenizer, max_length=1024):
             last_assistant_idx = i
 
     if last_assistant_idx is None:
-        return {}  # No assistant response found
+        return {"input_ids": None, "attention_mask": None, "labels": None}
 
     tokenized = tokenizer(
         full_text,
@@ -104,7 +105,7 @@ def preprocess(example, tokenizer, max_length=1024):
     
     # Skip if context alone fills the entire sequence (no room for assistant response)
     if context_len >= max_length - 10:  # Leave at least 10 tokens for response
-        return {}
+        return {"input_ids": None, "attention_mask": None, "labels": None}
     
     # Create labels array with proper length from the start
     labels = [-100] * len(input_ids)
@@ -165,7 +166,7 @@ def train(args):
     
     # Filter out empty examples
     original_len = len(dataset)
-    dataset = dataset.filter(lambda x: "input_ids" in x and x["input_ids"] is not None)
+    dataset = dataset.filter(lambda x: x["input_ids"] is not None)
     filtered_len = len(dataset)
     
     if filtered_len < original_len:
