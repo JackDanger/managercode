@@ -35,8 +35,6 @@ class SlackConfig:
 class DatabaseManager:
     """Manages database operations and compression."""
 
-    CURRENT_VERSION = 2  # Increment this when schema changes
-
     def __init__(self, db_path: str = DB_PATH):
         self.db_path = db_path
         self.conn = None
@@ -45,7 +43,6 @@ class DatabaseManager:
         """Establish database connection and setup schema."""
         self.conn = sqlite3.connect(self.db_path)
         self._setup_schema()
-        self._check_and_migrate()
 
     def close(self) -> None:
         """Close database connection."""
@@ -80,24 +77,13 @@ class DatabaseManager:
         """Create database tables if they don't exist."""
         cur = self.conn.cursor()
 
-        # Create version tracking table first
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS db_version (
-                version INTEGER PRIMARY KEY,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """
-        )
-
-        # Create all other tables
+        # Create all tables
         tables = [
             self._get_channels_schema(),
             self._get_messages_schema(),
             self._get_users_schema(),
             self._get_sync_runs_schema(),
             self._get_compressed_data_schema(),
-            self._get_channel_sync_state_schema(),
         ]
 
         for schema in tables:
@@ -105,78 +91,12 @@ class DatabaseManager:
 
         self.conn.commit()
 
-    def _check_and_migrate(self) -> None:
-        """Check database version and run migrations if needed."""
-        cur = self.conn.cursor()
-
-        # Get current version
-        cur.execute("SELECT version FROM db_version ORDER BY version DESC LIMIT 1")
-        row = cur.fetchone()
-        current_version = row[0] if row else 0
-
-        if current_version < self.CURRENT_VERSION:
-            self._run_migrations(current_version)
-
-    def _run_migrations(self, from_version: int) -> None:
-        """Run all necessary migrations."""
-        if from_version < 2:
-            self._migrate_to_v2()
-
-        # Update version
-        cur = self.conn.cursor()
-        cur.execute(
-            "INSERT INTO db_version (version) VALUES (?)", (self.CURRENT_VERSION,)
-        )
-        self.conn.commit()
-
-    def _migrate_to_v2(self) -> None:
-        """Migrate from version 1 to version 2 (compressed data)."""
-        logging.info("Starting migration to version 2 (compressed data)...")
-
-        # Create compressed_data table if it doesn't exist
-        cur = self.conn.cursor()
-        cur.execute(self._get_compressed_data_schema())
-
-        # Migrate channels
-        logging.info("Migrating channels...")
-        cur.execute("SELECT id, raw_json FROM channels WHERE raw_json IS NOT NULL")
-        for ch_id, raw_json in cur.fetchall():
-            if raw_json:
-                self.store_compressed_data("channels", ch_id, raw_json)
-                cur.execute(
-                    "UPDATE channels SET raw_json = NULL WHERE id = ?", (ch_id,)
-                )
-
-        # Migrate messages
-        logging.info("Migrating messages...")
-        cur.execute(
-            "SELECT channel_id, ts, raw_json FROM messages WHERE raw_json IS NOT NULL"
-        )
-        for ch_id, ts, raw_json in cur.fetchall():
-            if raw_json:
-                self.store_compressed_data("messages", f"{ch_id}_{ts}", raw_json)
-                cur.execute(
-                    "UPDATE messages SET raw_json = NULL WHERE channel_id = ? AND ts = ?",
-                    (ch_id, ts),
-                )
-
-        # Migrate users
-        logging.info("Migrating users...")
-        cur.execute("SELECT id, raw_json FROM users WHERE raw_json IS NOT NULL")
-        for user_id, raw_json in cur.fetchall():
-            if raw_json:
-                self.store_compressed_data("users", user_id, raw_json)
-                cur.execute("UPDATE users SET raw_json = NULL WHERE id = ?", (user_id,))
-
-        self.conn.commit()
-        logging.info("Migration to version 2 completed successfully")
-
     def _get_channels_schema(self) -> str:
         return """
         CREATE TABLE IF NOT EXISTS channels (
-            id       TEXT PRIMARY KEY,
-            name     TEXT,
-            raw_json TEXT,
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            oldest_ts_synced REAL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
@@ -198,7 +118,6 @@ class DatabaseManager:
             is_locked BOOLEAN,
             has_files BOOLEAN,
             has_blocks BOOLEAN,
-            raw_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (channel_id, ts)
@@ -208,11 +127,10 @@ class DatabaseManager:
     def _get_users_schema(self) -> str:
         return """
         CREATE TABLE IF NOT EXISTS users (
-            id         TEXT PRIMARY KEY,
-            name       TEXT,
-            real_name  TEXT,
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            real_name TEXT,
             display_name TEXT,
-            raw_json   TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
@@ -242,16 +160,6 @@ class DatabaseManager:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(table_name, record_id)
-        );
-        """
-
-    def _get_channel_sync_state_schema(self) -> str:
-        return """
-        CREATE TABLE IF NOT EXISTS channel_sync_state (
-            channel_name TEXT PRIMARY KEY,
-            latest_ts REAL,
-            earliest_ts REAL,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
 
@@ -290,8 +198,6 @@ class DatabaseManager:
     def get_compressed_data(self, table_name: str, record_id: str) -> Optional[str]:
         """Retrieve and decompress data from the compressed_data table."""
         cur = self.conn.cursor()
-
-        # First try compressed data
         cur.execute(
             """
             SELECT compressed_data
@@ -304,25 +210,6 @@ class DatabaseManager:
         row = cur.fetchone()
         if row:
             return self.decompress_data(row[0])
-
-        # If not found in compressed_data, try raw_json (for backward compatibility)
-        if table_name == "channels":
-            cur.execute("SELECT raw_json FROM channels WHERE id = ?", (record_id,))
-        elif table_name == "messages":
-            ch_id, ts = record_id.split("_")
-            cur.execute(
-                "SELECT raw_json FROM messages WHERE channel_id = ? AND ts = ?",
-                (ch_id, ts),
-            )
-        elif table_name == "users":
-            cur.execute("SELECT raw_json FROM users WHERE id = ?", (record_id,))
-
-        row = cur.fetchone()
-        if row and row[0]:
-            # If found in raw_json, migrate it to compressed_data
-            self.store_compressed_data(table_name, record_id, row[0])
-            return row[0]
-
         return None
 
 
@@ -446,19 +333,10 @@ class ChannelManager:
                 # Update channel info and reset sync state if needed
                 cur.execute(
                     """
-                    INSERT OR REPLACE INTO channels (id, name, updated_at)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    INSERT OR REPLACE INTO channels (id, name, oldest_ts_synced, updated_at)
+                    VALUES (?, ?, NULL, CURRENT_TIMESTAMP)
                 """,
                     (ch_id, ch_name),
-                )
-
-                # Initialize sync state if it doesn't exist
-                cur.execute(
-                    """
-                    INSERT OR IGNORE INTO sync_state (channel_id, is_fully_synced)
-                    VALUES (?, 0)
-                """,
-                    (ch_id,),
                 )
 
                 channels_processed += 1
@@ -678,73 +556,6 @@ class ChannelManager:
         return j.get("items", [])
 
 
-@dataclass
-class ChannelSyncState:
-    """
-    Tracks the sync state for a channel. We maintain:
-    - latest_ts: The most recent message we've seen
-    - earliest_ts: The oldest message we've seen
-    
-    The sync process is simple:
-    1. Always fetch from latest to earliest
-    2. Stop when we see messages we already have
-    3. If interrupted, resume from latest_ts
-    """
-    name: str
-    latest_ts: Optional[float] = None
-    earliest_ts: Optional[float] = None
-    messages_processed: int = 0
-    pages_processed: int = 0
-
-    def __init__(self, name: str, db: DatabaseManager):
-        self.name = name
-        self.db = db
-        self._load_state()
-
-    def _load_state(self):
-        """Load existing sync state from database."""
-        cur = self.db.conn.cursor()
-        cur.execute("""
-            SELECT latest_ts, earliest_ts
-            FROM channel_sync_state 
-            WHERE channel_name = ?
-        """, (self.name,))
-        row = cur.fetchone()
-        if row:
-            self.latest_ts = row[0]
-            self.earliest_ts = row[1]
-
-    def save_state(self):
-        """Save current sync state to database."""
-        cur = self.db.conn.cursor()
-        cur.execute("""
-            INSERT OR REPLACE INTO channel_sync_state 
-            (channel_name, latest_ts, earliest_ts, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        """, (
-            self.name,
-            self.latest_ts,
-            self.earliest_ts
-        ))
-        self.db.conn.commit()
-
-    def update_cursor(self, latest_ts: float, oldest_ts: float):
-        """Update cursors with new message timestamps."""
-        if self.latest_ts is None or latest_ts > self.latest_ts:
-            self.latest_ts = latest_ts
-        if self.earliest_ts is None or oldest_ts < self.earliest_ts:
-            self.earliest_ts = oldest_ts
-        self.save_state()
-
-    def is_complete(self) -> bool:
-        """Check if we've seen all messages in this batch."""
-        return self.earliest_ts is not None
-
-    def get_cursor(self) -> Optional[float]:
-        """Get the cursor for the next fetch."""
-        return self.latest_ts  # Always start from latest
-
-
 class MessageProcessor:
     """Handles processing and storing individual messages."""
 
@@ -827,87 +638,98 @@ class MessageManager:
         self.slack = slack
         self.channel_manager = channel_manager
         self.message_processor = MessageProcessor(db)
-        self._last_response = None
 
     def sync_all_channels(self) -> Tuple[int, int]:
-        """Sync messages from all channels using a round-robin approach."""
+        """Sync messages from all channels, one at a time."""
         channels_processed = 0
         messages_processed = 0
 
         try:
-            # Get channels that need syncing
+            # Get all channels
             channels = self.channel_manager.list_all_channels()
             total_channels = len(channels)
 
             print(f"\nStarting sync of {total_channels} channels...")
 
-            # Initialize channel states
-            channel_states = {
-                ch_id: ChannelSyncState(
-                    name=ch_name,
-                    db=self.db
-                )
-                for ch_id, ch_name in channels
-            }
+            # Process each channel
+            for ch_id, ch_name in channels:
+                channel_msgs, channel_success = self.sync_channel(ch_id, ch_name)
+                if channel_success:
+                    channels_processed += 1
+                messages_processed += channel_msgs
 
-            # Calculate max channel name length for padding
-            max_channel_length = max(
-                len(state.name) for state in channel_states.values()
-            )
-
-            while True:
-                all_complete = True
-                for ch_id, state in channel_states.items():
-                    # Get cursor for next fetch
-                    cursor = state.get_cursor()
-                    
-                    # Fetch and process messages
-                    messages, latest_ts, oldest_ts = self._fetch_messages(ch_id, cursor)
-                    if not messages:
-                        continue
-
-                    # Process messages and update state
-                    msgs_processed, latest_ts, oldest_ts = (
-                        self.message_processor.process_messages(ch_id, messages)
-                    )
-                    messages_processed += msgs_processed
-                    state.messages_processed += msgs_processed
-                    state.pages_processed += 1
-
-                    if latest_ts and oldest_ts:
-                        state.update_cursor(latest_ts, oldest_ts)
-                        self._print_progress(
-                            state, latest_ts, oldest_ts, max_channel_length
-                        )
-
-                    # If we've seen messages before this batch, we're done with this channel
-                    if state.earliest_ts is not None and oldest_ts >= state.earliest_ts:
-                        print(f"#{state.name}: Caught up with existing messages")
-                        continue
-
-                    all_complete = False
-
-                    if self.slack.config.verbose:
-                        print(f"Sleeping for {self.slack.config.rate_limit} seconds")
-                    time.sleep(self.slack.config.rate_limit)
-
-                # If all channels are complete, we're done
-                if all_complete:
-                    break
-
-            print(
-                f"\nSync complete: {messages_processed} messages from {channels_processed} channels"
-            )
+            print(f"\nSync complete: {messages_processed} messages from {channels_processed} channels")
             return channels_processed, messages_processed
 
         except Exception as e:
             logging.error(f"Sync failed: {str(e)}")
             raise
 
-    def _fetch_messages(
-        self, channel_id: str, cursor: Optional[float]
-    ) -> Tuple[List[Dict], Optional[float], Optional[float]]:
-        """Fetch a page of messages from a channel."""
+    def sync_channel(self, channel_id: str, channel_name: str) -> Tuple[int, bool]:
+        """Sync a single channel completely before moving to the next."""
+        # Get the oldest timestamp we've seen for this channel
+        cur = self.db.conn.cursor()
+        cur.execute("SELECT oldest_ts_synced FROM channels WHERE id = ?", (channel_id,))
+        row = cur.fetchone()
+        oldest_ts_synced = row[0] if row and row[0] is not None else None
+
+        print(f"\nSyncing #{channel_name}...")
+        
+        messages_processed = 0
+        batch_size = 0
+        latest_cursor = None
+        has_more = True
+
+        while has_more:
+            # Fetch messages, starting from latest_cursor or beginning
+            messages, has_more, new_cursor = self._fetch_messages(channel_id, latest_cursor)
+            
+            # If we got no messages, we're done with this channel
+            if not messages:
+                print(f"#{channel_name}: No messages found")
+                break
+                
+            # Check if we've reached previously synced messages
+            if oldest_ts_synced is not None:
+                # Find first message with timestamp <= oldest_ts_synced
+                for i, msg in enumerate(messages):
+                    if float(msg.get('ts', 0)) <= oldest_ts_synced:
+                        # We've reached previously synced messages, only process newer ones
+                        messages = messages[:i]
+                        has_more = False  # Stop fetching more
+                        break
+            
+            # Process this batch of messages
+            if messages:
+                batch_size, latest_ts, batch_oldest_ts = self.message_processor.process_messages(channel_id, messages)
+                messages_processed += batch_size
+                
+                # Update channel's oldest_ts_synced if this is the oldest batch we've seen
+                if batch_oldest_ts is not None:
+                    if oldest_ts_synced is None or batch_oldest_ts < oldest_ts_synced:
+                        cur.execute(
+                            "UPDATE channels SET oldest_ts_synced = ? WHERE id = ?",
+                            (batch_oldest_ts, channel_id)
+                        )
+                        oldest_ts_synced = batch_oldest_ts
+                        self.db.conn.commit()
+                
+                print(f"#{channel_name}: Processed {batch_size} messages (total: {messages_processed})")
+            
+            # Update cursor for next batch
+            latest_cursor = new_cursor
+            
+            # Sleep to respect rate limits
+            time.sleep(self.slack.config.rate_limit)
+        
+        return messages_processed, messages_processed > 0
+
+    def _fetch_messages(self, channel_id: str, cursor: Optional[str]) -> Tuple[List[Dict], bool, Optional[str]]:
+        """Fetch a batch of messages from a channel.
+        
+        Returns:
+            Tuple of (messages, has_more, next_cursor)
+        """
         url = f"https://{self.slack.config.subdomain}.slack.com/api/conversations.history"
 
         # Create multipart form data
@@ -950,10 +772,10 @@ class MessageManager:
         form_data.append("")
         form_data.append("200")
 
-        # Add latest parameter if we have a cursor
+        # Add cursor parameter if we have one
         if cursor is not None:
             form_data.append(f"--{boundary}")
-            form_data.append('Content-Disposition: form-data; name="latest"')
+            form_data.append('Content-Disposition: form-data; name="cursor"')
             form_data.append("")
             form_data.append(str(cursor))
 
@@ -1005,42 +827,14 @@ class MessageManager:
             j = r.json()
             
             messages = j.get("messages", [])
-            if not messages:
-                return [], None, None
-
-            # Get latest and oldest timestamps from messages
-            latest_ts = float(messages[0].get("ts", 0))
-            oldest_ts = float(messages[-1].get("ts", 0))
+            has_more = j.get("has_more", False)
+            next_cursor = j.get("response_metadata", {}).get("next_cursor")
             
-            return messages, latest_ts, oldest_ts
+            return messages, has_more, next_cursor
 
         except Exception as e:
             logging.error(f"Error fetching messages for channel {channel_id}: {e}")
-            return [], None, None
-
-    def _print_progress(
-        self,
-        state: ChannelSyncState,
-        latest_ts: float,
-        oldest_ts: float,
-        max_channel_length: int,
-    ) -> None:
-        """Print progress for a channel."""
-        try:
-            latest_time = datetime.fromtimestamp(latest_ts).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            oldest_time = datetime.fromtimestamp(oldest_ts).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            padded_name = f"#{state.name}".ljust(max_channel_length + 1)
-            print(
-                f"{padded_name}: {state.messages_processed} messages - {latest_time} to {oldest_time}"
-            )
-        except (ValueError, OSError) as e:
-            logging.warning(f"Error formatting timestamp: {e}")
-            padded_name = f"#{state.name}".ljust(max_channel_length + 1)
-            print(f"{padded_name}: {state.messages_processed} messages")
+            return [], False, None
 
 
 class UserManager:
@@ -1567,11 +1361,58 @@ def main():
         channel_manager = ChannelManager(db, slack)
         message_manager = MessageManager(db, channel_manager, slack)
 
-        #user_manager.fetch_all_users()
-        #channel_manager.fetch_all_channels()
-        message_manager.sync_all_channels()
-
-        logging.info("Done! Archive stored in %s", DB_PATH)
+        # Start syncing - add sync_run tracking
+        cur = db.conn.cursor()
+        cur.execute("INSERT INTO sync_runs (status) VALUES ('running')")
+        sync_run_id = cur.lastrowid
+        db.conn.commit()
+        
+        try:
+            print("\n=== Starting Slack Archive Sync ===\n")
+            
+            # Step 1: Fetch users
+            user_count = user_manager.fetch_all_users()
+            
+            # Step 2: Fetch channels
+            channel_count = channel_manager.fetch_all_channels()
+            
+            # Step 3: Sync messages from all channels
+            channels_processed, messages_processed = message_manager.sync_all_channels()
+            
+            # Update sync run status
+            cur.execute(
+                """
+                UPDATE sync_runs 
+                SET finished_at = CURRENT_TIMESTAMP, 
+                    status = 'completed',
+                    channels_processed = ?,
+                    messages_processed = ?
+                WHERE id = ?
+            """, 
+                (channels_processed, messages_processed, sync_run_id)
+            )
+            db.conn.commit()
+            
+            print("\n=== Sync Complete ===")
+            print(f"Users: {user_count}")
+            print(f"Channels: {channel_count}")
+            print(f"Messages: {messages_processed}")
+            print(f"Archive stored in {DB_PATH}")
+            
+        except Exception as e:
+            # Mark sync run as failed
+            cur.execute(
+                """
+                UPDATE sync_runs 
+                SET finished_at = CURRENT_TIMESTAMP, 
+                    status = 'failed',
+                    error = ?
+                WHERE id = ?
+            """, 
+                (str(e), sync_run_id)
+            )
+            db.conn.commit()
+            raise
 
     finally:
         db.close()
