@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 def get_github_team_members(org, team):
-    members_url_cmd = "gh api /orgs/Datavant/teams/Engineering"
+    members_url_cmd = f"gh api /orgs/{org}/teams/{team}"
     output = subprocess.check_output(members_url_cmd, shell=True).decode('utf-8')
     team_data = json.loads(output)
     members_url = team_data['members_url']
@@ -86,6 +86,9 @@ def main():
     team = args.team
     ignore = args.ignore
     since_date = args.since
+    since_slug = since_date.replace(' ', '-')
+
+    output_file = f'git.{since_slug}.graphData.json'
 
     # Get GitHub team members
     if team is not None:
@@ -123,8 +126,12 @@ def main():
     }
 
     # Print JSON file
-    json.dump(data, sys.stdout, indent=2)
-
-
+    with open(output_file, 'w') as f:
+        json.dump(data, f, indent=2)
+    print(f"Wrote graph to {output_file}")
+    print("run with:")
+    print("")
+    print(f"  ./render.sh {since_slug} {output_file} [s3://bucket/path]")
+  
 if __name__ == "__main__":
     main()
