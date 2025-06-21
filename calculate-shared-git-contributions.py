@@ -30,14 +30,27 @@ def get_github_team_members(org, team):
     return [member['login'] for member in members_data['members']]
 
 
-def get_git_history(directory, user_names, ignore, since):
+def get_git_commit_counts(directory, user_commits, ignore, since):
+
+    counts = subprocess.run(f"git -C {directory} log --format='%ae' --since '{since}' | sort | uniq -c", shell=True, capture_output=True, text=True)
+
+    for line in counts.stdout.split("\n"):
+        columns = re.split(r'\s+', line.strip(), maxsplit=1)
+        if len(columns) > 1:
+            count, email = columns
+            username = email.split('@')[0]
+            user_commits[username] += int(count)
+
+    return user_commits
+
+def get_git_files_changed(directory, user_names, ignore, since):
     user_files = defaultdict(set)
 
     git_log_cmd = ["git", "-C", directory, "log", "--name-only", "--format=BREAK: %cl %an", f"--since={since}"]
     result = subprocess.run(git_log_cmd, capture_output=True, text=True, check=True)
     history = result.stdout.split('\n')
 
-    current_author_email = None
+    current_username = None
 
     breakline = re.compile('^BREAK: ([^ ]+) (.*)')
 
@@ -45,12 +58,12 @@ def get_git_history(directory, user_names, ignore, since):
         match = breakline.match(line)
 
         if match:
-            current_author_email = match.group(1)
-            user_names[current_author_email] = match.group(2)
+            current_username = match.group(1)
+            user_names[current_username] = match.group(2)
         elif line.strip() == '':
             pass
-        elif current_author_email:
-            user_files[current_author_email].add(line.strip())
+        elif current_username:
+            user_files[current_username].add(line.strip())
 
     return user_files
 
@@ -101,13 +114,18 @@ def main():
     user_names = dict()
     # Get git history of all repos in the directory
     user_files = defaultdict(set)
+    user_commits = defaultdict(int)
     for repo in Path(directory).iterdir():
         if repo.is_dir() and (repo / ".git").exists():
-            history = get_git_history(str(repo), user_names, ignore=ignore, since='90 days ago')
-            for user, files in history.items():
+
+            files_changed = get_git_files_changed(str(repo), user_names, ignore=ignore, since='90 days ago')
+            for user, files in files_changed.items():
                 for filename in files:
                     file = f'{repo}/{filename}'
                     user_files[user].add(file)
+
+            get_git_commit_counts(str(repo), user_commits, ignore=ignore, since='90 days ago')
+
 
     if team is not None:
         # Filter only team members
@@ -124,7 +142,7 @@ def main():
     # Build connection graph
     connection_graph = build_connection_graph(user_files)
     data = {
-        'nodes': [ { 'id': email, 'group': 1, 'count': len(user_files[email])} for email in user_files],
+        'nodes': [ { 'id': username, 'group': 1, 'count': user_commits[username]} for username in user_files],
         'links': connection_graph,
     }
 
