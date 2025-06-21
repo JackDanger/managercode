@@ -1764,42 +1764,50 @@ The enhanced format trades training time for knowledge comprehensiveness, making
         print(f"Output: {output_path}")
 
     def _stream_channel_for_rag(self, channel_id: str, channel_name: str, include_thread_summaries: bool, batch_size: int, stats: Dict):
-        """Stream RAG-optimized documents for a channel with minimal memory overhead."""
-        # Use a separate cursor for this operation to avoid conflicts
+        """Stream RAG-optimized documents for a channel using keyset pagination for optimal performance."""
         cur = self.db.conn.cursor()
         processed_threads = set()
-
-        # For very large channels, we need to be extra careful about memory
-        # Use server-side cursor with LIMIT/OFFSET to handle massive channels
-        offset = 0
-
-        # Get total count for progress tracking (optional for very large DBs)
-        try:
-            cur.execute("SELECT COUNT(*) FROM messages WHERE channel_id = ? AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')", (channel_id,))
-            total_count = cur.fetchone()[0]
-        except:
-            total_count = None  # Skip progress tracking if count is too expensive
+        last_ts = None  # Cursor for keyset pagination
+        processed_count = 0
 
         while True:
-            # Fetch messages in batches to avoid loading entire channel into memory
-            cur.execute(
-                """
-                SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
-                FROM messages m
-                WHERE m.channel_id = ?
-                AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
-                -- ORDER BY m.ts
-                LIMIT ? OFFSET ?
-                """,
-                (channel_id, batch_size, offset),
-            )
+            # Use keyset pagination with timestamp cursor for consistent performance
+            if last_ts is None:
+                # First batch - start from beginning
+                cur.execute(
+                    """
+                    SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
+                    FROM messages m
+                    WHERE m.channel_id = ?
+                    AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+                    ORDER BY m.ts
+                    LIMIT ?
+                    """,
+                    (channel_id, batch_size),
+                )
+            else:
+                # Subsequent batches - continue from last timestamp
+                cur.execute(
+                    """
+                    SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
+                    FROM messages m
+                    WHERE m.channel_id = ?
+                    AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+                    AND m.ts > ?
+                    ORDER BY m.ts
+                    LIMIT ?
+                    """,
+                    (channel_id, last_ts, batch_size),
+                )
 
             batch = cur.fetchall()
             if not batch:
                 break
 
+            # Process batch and update cursor
             for msg_row in batch:
                 ts, user_id, thread_ts, subtype, reply_count = msg_row
+                last_ts = ts  # Update cursor to this timestamp
 
                 # Get the full message data
                 raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
@@ -1835,24 +1843,17 @@ The enhanced format trades training time for knowledge comprehensiveness, making
                             yield thread_doc
                             processed_threads.add(ts)
 
-                    # Explicit cleanup for large messages
-                    del msg_data, raw_data
+                    processed_count += 1
+
+                    # Progress update for large channels
+                    if processed_count % (batch_size * 10) == 0:
+                        print(f"    Processed {processed_count:,} messages...")
 
                 except (json.JSONDecodeError, KeyError) as e:
                     logging.warning(f"Error processing message {channel_id}_{ts}: {e}")
                     continue
 
-            offset += batch_size
-
-            # Progress update for large channels
-            if total_count and offset % (batch_size * 10) == 0:
-                progress = min(100, (offset / total_count) * 100)
-                print(f"    Progress: {progress:.1f}% ({offset:,}/{total_count:,})")
-
-            # Clear batch from memory explicitly
-            del batch
-
-        # Clean up processed threads set
+        # Clean up
         processed_threads.clear()
         cur.close()
 
@@ -2170,26 +2171,27 @@ The enhanced format trades training time for knowledge comprehensiveness, making
             json.dump(metadata, f, indent=2, ensure_ascii=False)
 
         # Write README for RAG usage
-        readme_content = f"""# Slack RAG Export (Memory-Efficient Streaming)
+        readme_content = f"""# Slack RAG Export (High-Performance Streaming)
 
 This directory contains Slack conversations optimized for Retrieval Augmented Generation (RAG).
 
-**OPTIMIZED FOR TERABYTE-SCALE DATABASES**: This export uses streaming processing with configurable batch sizes to handle massive datasets with minimal memory overhead.
+**OPTIMIZED FOR TERABYTE-SCALE DATABASES**: This export uses keyset pagination and streaming processing to handle massive datasets with consistent performance regardless of database size.
 
 **BOT MESSAGES FILTERED**: Bot messages are automatically filtered out as they contain no useful information for RAG.
 
-## Memory-Efficient Features
+## High-Performance Features
 
+- **Keyset Pagination**: Uses timestamp-based cursors for consistent O(log n) performance, unlike LIMIT/OFFSET which degrades with dataset size
 - **Streaming Processing**: Documents are processed and written one-by-one, never loading entire datasets into memory
 - **Configurable Batch Size**: Use `--batch-size` to control memory usage (default: 1000 messages per batch)
-- **Progress Tracking**: Real-time progress updates for large channels
-- **Explicit Memory Management**: Automatic cleanup of processed data to prevent memory leaks
+- **Progress Tracking**: Real-time message count updates for large channels
+- **Index-Optimized Queries**: Leverages existing database indexes for maximum query performance
 - **Channel-by-Channel Processing**: Each channel is processed independently to maintain low memory footprint
 
 ## Usage for Large Databases
 
 ```bash
-# For very large databases (terabytes), use smaller batch sizes:
+# For very large databases (terabytes), keyset pagination maintains fast performance:
 python app.py --rag ./rag_export --batch-size 100
 
 # For systems with more RAM, you can use larger batches for faster processing:
