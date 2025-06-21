@@ -1776,6 +1776,7 @@ The enhanced format trades training time for knowledge comprehensiveness, making
                 SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
                 FROM messages m
                 WHERE m.channel_id = ?
+                AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
                 ORDER BY m.ts
                 LIMIT ? OFFSET ?
             """,
