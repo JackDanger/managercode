@@ -16,7 +16,7 @@ function main() {
   fi
 
   set -x
-  local parameterized_name=$(echo ${name} | tr -cd '[[:alpha:]]- ' | tr ' ' '-')
+  local parameterized_name=$(echo ${name} | tr -cd '[[:alpha:]0-9]- ' | tr ' ' '-')
 
   local deploy_dir=${parameterized_name}.gen
 
@@ -24,9 +24,6 @@ function main() {
   mkdir -p $deploy_dir
   cp ${filename} ${deploy_dir}/graphData.json
   cp index.html ${deploy_dir}/index.html
-  cp force-graph.js ${deploy_dir}/
-  cp adjacency-matrix.js ${deploy_dir}/
-  cp d3*.js ${deploy_dir}/
 
   if [[ -n "${s3}" ]]; then
     if [[ "${s3}" == "--s3" ]]; then

@@ -6,3 +6,4 @@ repoGraphData.json
 eng.emails
 *.gen
 slack-cache
+*.graphData.json
