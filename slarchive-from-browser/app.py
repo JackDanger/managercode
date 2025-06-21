@@ -95,12 +95,18 @@ class DatabaseManager:
             self._get_channels_schema(),
             self._get_messages_schema(),
             self._get_users_schema(),
-            self._get_messages_index_ddl(),
             self._get_compressed_data_schema(),
         ]
 
         for schema in tables:
             cur.execute(schema)
+
+        # Create indexes separately to handle multiple statements
+        index_statements = self._get_messages_index_ddl().strip().split(';')
+        for statement in index_statements:
+            statement = statement.strip()
+            if statement:  # Skip empty statements
+                cur.execute(statement)
 
         self.conn.commit()
 
@@ -138,7 +144,9 @@ class DatabaseManager:
         """
     def _get_messages_index_ddl(self) -> str:
         return """
-        CREATE INDEX IF NOT EXISTS channel_subtype_ts_idx ON messages(channel_id, subtype, ts);
+        CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(channel_id, thread_ts, ts);
+        CREATE INDEX IF NOT EXISTS idx_messages_subtype_filter ON messages(channel_id, ts) WHERE subtype NOT IN ('channel_join', 'channel_leave', 'bot_message');
+        CREATE INDEX IF NOT EXISTS idx_messages_reply_count ON messages(channel_id, reply_count, ts) WHERE reply_count > 0;
         """
 
     def _get_users_schema(self) -> str:
@@ -215,6 +223,38 @@ class DatabaseManager:
         if row:
             return self.decompress_data(row[0])
         return None
+
+    def migrate_indexes(self) -> None:
+        """
+        Migrate existing database to use optimized indexes.
+        This method can be called to update databases created with the old index structure.
+        """
+        cur = self.conn.cursor()
+
+        # Drop the old inefficient index if it exists
+        try:
+            cur.execute("DROP INDEX IF EXISTS channel_subtype_ts_idx")
+            print("Dropped old inefficient index: channel_subtype_ts_idx")
+        except Exception as e:
+            logging.warning(f"Could not drop old index: {e}")
+
+        # Create new optimized indexes
+        index_statements = self._get_messages_index_ddl().strip().split(';')
+        for statement in index_statements:
+            statement = statement.strip()
+            if statement:
+                try:
+                    cur.execute(statement)
+                    # Extract index name for logging
+                    import re
+                    match = re.search(r'CREATE INDEX IF NOT EXISTS (\w+)', statement)
+                    if match:
+                        print(f"Created optimized index: {match.group(1)}")
+                except Exception as e:
+                    logging.error(f"Failed to create index: {statement}\nError: {e}")
+
+        self.conn.commit()
+        print("Index migration completed!")
 
 
 class SlackClient:
@@ -1627,77 +1667,6 @@ class Exporter:
         with open(os.path.join(output_dir, "enhanced_summary.json"), "w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2, ensure_ascii=False)
 
-        # Enhanced README
-        readme_content = f"""# Enhanced Slack Knowledge Training Data
-
-This directory contains Slack conversations optimized for comprehensive organizational knowledge capture.
-
-## Enhanced Strategies
-
-### Knowledge-Focused Export
-- Prioritizes messages with high technical/organizational value
-- Uses importance scoring based on length, keywords, engagement
-- Context window: {self.KNOWLEDGE_EXTRACTION_TOKENS:,} tokens
-- Filters out low-value content to focus on knowledge-dense discussions
-
-### Thread-Complete Export
-- Ensures complete thread capture regardless of size
-- Maintains full context for complex discussions
-- Preserves problem-solution continuity
-- Ideal for troubleshooting and decision-making knowledge
-
-### Temporal-Context Export
-- Maintains temporal relationships with overlapping windows
-- Captures evolving discussions and context development
-- 33% overlap between windows for continuity
-- Preserves chronological knowledge development
-
-### Comprehensive Export
-- Combines all strategies for maximum coverage
-- Multiple perspectives on the same content
-- Prioritized training examples (high/medium/low priority)
-- 4x training examples per conversation (different prompt types)
-
-## Training Data Format
-
-Each conversation generates 4 training examples with different prompt types:
-
-1. **Concept Explanation**: Extract and explain technical concepts
-2. **Problem-Solution**: Document troubleshooting and solutions
-3. **Process Documentation**: Capture workflows and procedures
-4. **Decision Rationale**: Preserve decision-making reasoning
-
-## Optimization for GPU Cycles
-
-This format is designed for scenarios where you want to spend extra GPU cycles for better knowledge capture:
-
-- Larger context windows ({self.KNOWLEDGE_EXTRACTION_TOKENS:,} tokens vs 2,048)
-- More training examples per conversation (4x multiplier)
-- Multiple processing strategies for comprehensive coverage
-- Importance-based filtering to focus on valuable content
-- Complete thread preservation for complex discussions
-
-## Statistics
-
-- Total conversations: {total_conversations:,}
-- Total training examples: {sum(f['training_examples'] for f in all_files):,}
-- Total channels: {len(channels):,}
-- Strategies: {', '.join(strategies)}
-- Export date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-## Usage Recommendations
-
-1. **For comprehensive knowledge**: Use all strategies
-2. **For focused training**: Use knowledge_focused only
-3. **For problem-solving**: Emphasize thread_complete
-4. **For process capture**: Use temporal_context + knowledge_focused
-
-The enhanced format trades training time for knowledge comprehensiveness, making your fine-tuned model much more capable of explaining organizational concepts that were discussed informally in Slack.
-"""
-
-        with open(os.path.join(output_dir, "ENHANCED_README.md"), "w", encoding="utf-8") as f:
-            f.write(readme_content)
-
     def export_for_rag(self, output_dir: str, include_thread_summaries: bool = True, batch_size: int = 1000) -> None:
         """Export database contents optimized for RAG (Retrieval Augmented Generation).
 
@@ -2170,131 +2139,6 @@ The enhanced format trades training time for knowledge comprehensiveness, making
         with open(os.path.join(output_dir, "rag_metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-        # Write README for RAG usage
-        readme_content = f"""# Slack RAG Export (High-Performance Streaming)
-
-This directory contains Slack conversations optimized for Retrieval Augmented Generation (RAG).
-
-**OPTIMIZED FOR TERABYTE-SCALE DATABASES**: This export uses keyset pagination and streaming processing to handle massive datasets with consistent performance regardless of database size.
-
-**BOT MESSAGES FILTERED**: Bot messages are automatically filtered out as they contain no useful information for RAG.
-
-## High-Performance Features
-
-- **Keyset Pagination**: Uses timestamp-based cursors for consistent O(log n) performance, unlike LIMIT/OFFSET which degrades with dataset size
-- **Streaming Processing**: Documents are processed and written one-by-one, never loading entire datasets into memory
-- **Configurable Batch Size**: Use `--batch-size` to control memory usage (default: 1000 messages per batch)
-- **Progress Tracking**: Real-time message count updates for large channels
-- **Index-Optimized Queries**: Leverages existing database indexes for maximum query performance
-- **Channel-by-Channel Processing**: Each channel is processed independently to maintain low memory footprint
-
-## Usage for Large Databases
-
-```bash
-# For very large databases (terabytes), keyset pagination maintains fast performance:
-python app.py --rag ./rag_export --batch-size 100
-
-# For systems with more RAM, you can use larger batches for faster processing:
-python app.py --rag ./rag_export --batch-size 5000
-
-# Default (balanced for most systems):
-python app.py --rag ./rag_export --batch-size 1000
-```
-
-## Document Structure
-
-Each document in `slack_rag_documents.jsonl` has this structure:
-
-```json
-{{
-    "id": "unique_document_id",
-    "content": "searchable text content",
-    "metadata": {{
-        "type": "message|thread",
-        "channel": "channel-name",
-        "user": "User Name",
-        "timestamp": "1234567890.123456",
-        "datetime": "2024-01-01T12:00:00",
-        "content_type": "code|discussion_starter|decision|etc",
-        "importance_score": 2.5,
-        "mentions": {{"users": [...], "channels": [...], "links": [...]}},
-        "has_code": true,
-        "has_files": false,
-        "reactions": ["thumbsup", "eyes"],
-        // ... additional metadata
-    }}
-}}
-```
-
-## Statistics
-
-- **Total Documents**: {stats['total_documents']:,}
-- **Messages**: {stats['document_types'].get('message', 0):,}
-- **Thread Summaries**: {stats['document_types'].get('thread', 0):,}
-- **Unique Users**: {stats['user_count']:,}
-- **Channels**: {stats['channels']:,}
-- **Bot Messages Filtered**: {stats['bot_messages_filtered']:,}
-- **Date Range**: {stats['date_range']['earliest'][:10] if stats['date_range']['earliest'] else 'N/A'} to {stats['date_range']['latest'][:10] if stats['date_range']['latest'] else 'N/A'}
-- **Avg Document Length**: {stats['avg_length']:.0f} characters
-- **Documents with Code**: {stats['has_code']:,}
-- **Documents with Files**: {stats['has_files']:,}
-
-## RAG Usage Patterns
-
-### Attribution Queries
-Find what specific people said about topics:
-```
-Query: "What does Andrea think about product strategy?"
-Filter: metadata.user = "Andrea"
-```
-
-### System/Technical Queries
-Find discussions about specific systems:
-```
-Query: "Back Office ChartFinder interaction"
-Filter: metadata.content_type contains "technical_discussion"
-```
-
-### Expert Knowledge Queries
-Find expertise from specific people:
-```
-Query: "SQL recommendations for lost records"
-Filter: metadata.user = "Josh" AND metadata.has_code = true
-```
-
-### Temporal Queries
-Find discussions from specific time periods:
-```
-Filter: metadata.date >= "2024-01-01"
-```
-
-### High-Value Content
-Focus on important discussions:
-```
-Filter: metadata.importance_score >= 3.0
-```
-
-## Framework Integration
-
-This format works with most RAG frameworks:
-
-- **LangChain**: Use `JSONLinesLoader` to load documents
-- **LlamaIndex**: Use `JSONReader` with metadata support
-- **Haystack**: Use `JsonlDocumentStore`
-- **Chroma**: Load as documents with metadata
-- **Pinecone/Weaviate**: Use metadata for filtering
-
-## Content Types
-
-The export identifies these content types:
-{chr(10).join(f"- **{k}**: {v} documents" for k, v in sorted(stats['content_types'].items()) if k)}
-
-See `rag_metadata.json` for complete statistics and schema information.
-"""
-
-        with open(os.path.join(output_dir, "README.md"), "w", encoding="utf-8") as f:
-            f.write(readme_content)
-
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
@@ -2317,6 +2161,11 @@ def parse_args() -> argparse.Namespace:
     mode_group.add_argument(
         "--rag",
         help="Export database contents optimized for RAG (Retrieval Augmented Generation) to the specified directory",
+    )
+    mode_group.add_argument(
+        "--migrate-indexes",
+        action="store_true",
+        help="Migrate existing database to use optimized indexes (recommended for existing installations)",
     )
 
     # Enhanced export options
@@ -2358,11 +2207,11 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     # For archive mode, validate required arguments
-    if not args.enhanced_export and not args.rag and not all(
+    if not args.enhanced_export and not args.rag and not args.migrate_indexes and not all(
         [args.subdomain, args.org, args.x_version_timestamp, args.team, args.cookie]
     ):
         parser.error(
-            "When archiving (not using --enhanced-export or --rag), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie"
+            "When archiving (not using --enhanced-export, --rag, or --migrate-indexes), the following arguments are required: subdomain, --org, --x-version-timestamp, --team, --cookie"
         )
 
     return args
@@ -2402,6 +2251,11 @@ def main():
     db.connect()
 
     try:
+        if args.migrate_indexes:
+            print("\n=== Migrating Database Indexes ===\n")
+            db.migrate_indexes()
+            return
+
         if args.enhanced_export:
             exporter = Exporter(db)
             exporter.export_for_comprehensive_training(args.enhanced_export, args.strategies)
