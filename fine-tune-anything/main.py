@@ -309,7 +309,7 @@ def train(args):
         fp16=True,
         remove_unused_columns=False,
         logging_steps=20,
-        save_steps=500,
+        save_steps=50,
         save_total_limit=2,
         report_to="none",
         warmup_ratio=0.1,
