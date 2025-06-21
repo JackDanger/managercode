@@ -373,9 +373,9 @@ class ConversationProcessor:
 class DatasetProcessor:
     """Processes entire datasets for training."""
 
-    def __init__(self, conversation_processor: ConversationProcessor):
+    def __init__(self, conversation_processor: ConversationProcessor, batch_size: int = 100):
         self.conversation_processor = conversation_processor
-        self.batch_size = 100
+        self.batch_size = batch_size
 
     def process_dataset(self, dataset: Dataset) -> Dataset:
         """Process dataset and expand conversations into training chunks."""
@@ -588,7 +588,7 @@ class FineTuningApplication:
         processor = ConversationProcessor(
             self.model_manager.tokenizer, self.args.max_length
         )
-        dataset_processor = DatasetProcessor(processor)
+        dataset_processor = DatasetProcessor(processor, self.args.dataset_batch_size)
         processed_dataset = dataset_processor.process_dataset(dataset)
 
         # Validate dataset
@@ -683,6 +683,12 @@ def parse_arguments():
     )
     parser.add_argument(
         "--batch-size", type=int, default=1, help="Batch size per device."
+    )
+    parser.add_argument(
+        "--dataset-batch-size",
+        type=int,
+        default=100,
+        help="Batch size for dataset processing (different from training batch size).",
     )
     parser.add_argument(
         "--gradient-accumulation-steps",
