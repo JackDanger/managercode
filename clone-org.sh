@@ -15,7 +15,7 @@ clone_org() {
   cd "$checkout_location" || exit
 
   # Fetch the list of repositories for the organization and clone each one
-  gh repo list "$organization" --no-archived --limit 1000 --json name -q '.[].name' | while read -r repo; do
+  gh repo list "$organization" --no-archived --limit 5000 --json name -q '.[].name' | while read -r repo; do
     git_dir="${checkout_location}/${repo}"
     if [[ -d $git_dir ]]; then
       true
@@ -23,7 +23,7 @@ clone_org() {
       git pull --recurse-submodules
       popd
     else
-      echo gh repo clone "$organization/$repo"
+      gh repo clone "$organization/$repo"
     fi
   done
 }
