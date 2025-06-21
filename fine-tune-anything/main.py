@@ -2,8 +2,12 @@ import os
 import gc
 import torch
 import argparse
+import json
+import hashlib
+from datetime import datetime
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datasets import load_dataset, Dataset
 from transformers import (
     AutoModelForCausalLM,
@@ -373,7 +377,9 @@ class ConversationProcessor:
 class DatasetProcessor:
     """Processes entire datasets for training."""
 
-    def __init__(self, conversation_processor: ConversationProcessor, batch_size: int = 100):
+    def __init__(
+        self, conversation_processor: ConversationProcessor, batch_size: int = 100
+    ):
         self.conversation_processor = conversation_processor
         self.batch_size = batch_size
 
@@ -457,6 +463,146 @@ class DatasetValidator:
         assert (
             input_length <= max_length
         ), f"Sample exceeds max_length: {input_length} > {max_length}"
+
+
+@dataclass
+class DatasetProcessingConfig:
+    """Configuration that affects dataset processing."""
+
+    jsonl_file: str
+    model_name: str
+    max_length: int
+    dataset_batch_size: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for hashing."""
+        return asdict(self)
+
+
+class DatasetCache:
+    """Manages caching of processed datasets."""
+
+    def __init__(self, cache_dir: str):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.metadata_file = self.cache_dir / "dataset_cache_metadata.json"
+        self.cache_file = self.cache_dir / "cached_dataset"
+
+    def _compute_cache_key(
+        self, config: DatasetProcessingConfig, dataset_hash: str
+    ) -> str:
+        """Compute a unique cache key based on processing configuration and dataset content."""
+        config_dict = config.to_dict()
+        config_dict["dataset_hash"] = dataset_hash
+
+        # Create a stable hash of the configuration
+        config_str = json.dumps(config_dict, sort_keys=True)
+        return hashlib.sha256(config_str.encode()).hexdigest()
+
+    def _compute_dataset_hash(self, dataset_path: str) -> str:
+        """Compute hash of the dataset file content."""
+        hasher = hashlib.sha256()
+        with open(dataset_path, "rb") as f:
+            # Read in chunks to handle large files
+            for chunk in iter(lambda: f.read(4096), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _load_metadata(self) -> Dict[str, Any]:
+        """Load cache metadata from disk."""
+        if self.metadata_file.exists():
+            with open(self.metadata_file, "r") as f:
+                return json.load(f)
+        return {}
+
+    def _save_metadata(self, metadata: Dict[str, Any]):
+        """Save cache metadata to disk."""
+        with open(self.metadata_file, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    def get_cached_dataset(self, config: DatasetProcessingConfig) -> Optional[Dataset]:
+        """Retrieve cached dataset if it exists and is valid."""
+        try:
+            # Compute dataset file hash
+            dataset_hash = self._compute_dataset_hash(config.jsonl_file)
+            cache_key = self._compute_cache_key(config, dataset_hash)
+
+            # Check if cache exists
+            metadata = self._load_metadata()
+            if cache_key not in metadata:
+                return None
+
+            cache_info = metadata[cache_key]
+            cache_path = self.cache_dir / cache_info["filename"]
+
+            if not cache_path.exists():
+                print(f"Cache file {cache_path} not found, will reprocess dataset")
+                return None
+
+            # Load cached dataset
+            print(f"\nLoading cached dataset from {cache_path}")
+            print(f"Cache created at: {cache_info['created_at']}")
+            print(f"Original dataset: {cache_info['original_file']}")
+
+            dataset = Dataset.load_from_disk(str(cache_path))
+            print(f"Loaded {len(dataset)} cached examples")
+
+            return dataset
+
+        except Exception as e:
+            print(f"Error loading cached dataset: {e}")
+            return None
+
+    def save_dataset(self, dataset: Dataset, config: DatasetProcessingConfig):
+        """Save processed dataset to cache."""
+        try:
+            # Compute cache key
+            dataset_hash = self._compute_dataset_hash(config.jsonl_file)
+            cache_key = self._compute_cache_key(config, dataset_hash)
+
+            # Generate unique filename for this cache
+            cache_filename = f"dataset_cache_{cache_key[:16]}"
+            cache_path = self.cache_dir / cache_filename
+
+            # Save dataset
+            print(f"\nSaving processed dataset to cache: {cache_path}")
+            dataset.save_to_disk(str(cache_path))
+
+            # Update metadata
+            metadata = self._load_metadata()
+            metadata[cache_key] = {
+                "filename": cache_filename,
+                "created_at": datetime.now().isoformat(),
+                "original_file": config.jsonl_file,
+                "config": config.to_dict(),
+                "dataset_hash": dataset_hash,
+                "num_examples": len(dataset),
+            }
+            self._save_metadata(metadata)
+
+            print(f"Dataset cached successfully")
+
+        except Exception as e:
+            print(f"Error saving dataset to cache: {e}")
+
+    def clear_cache(self):
+        """Clear all cached datasets."""
+        print(f"Clearing dataset cache in {self.cache_dir}")
+
+        # Remove all cache files
+        for cache_file in self.cache_dir.glob("dataset_cache_*"):
+            if cache_file.is_dir():
+                import shutil
+
+                shutil.rmtree(cache_file)
+            else:
+                cache_file.unlink()
+
+        # Clear metadata
+        if self.metadata_file.exists():
+            self.metadata_file.unlink()
+
+        print("Cache cleared")
 
 
 class FineTuner:
@@ -570,26 +716,65 @@ class FineTuningApplication:
 
     def run_training(self):
         """Execute the training workflow."""
-        # Load dataset
-        dataset = self._load_dataset()
-
-        # Setup model with LoRA
-        lora_config = LoRAConfiguration(
-            rank=self.args.lora_r,
-            alpha=self.args.lora_alpha,
-            dropout=self.args.lora_dropout,
+        # Create dataset processing configuration
+        dataset_config = DatasetProcessingConfig(
+            jsonl_file=self.args.jsonl_file,
+            model_name=self.args.model_name,
+            max_length=self.args.max_length,
+            dataset_batch_size=self.args.dataset_batch_size,
         )
 
-        self.model_manager.load_base_model()
-        self.model_manager.apply_lora_adapter(lora_config)
-        self.model_manager.prepare_for_training()
+        # Initialize cache
+        cache = DatasetCache(self.args.output_dir)
 
-        # Process dataset
-        processor = ConversationProcessor(
-            self.model_manager.tokenizer, self.args.max_length
-        )
-        dataset_processor = DatasetProcessor(processor, self.args.dataset_batch_size)
-        processed_dataset = dataset_processor.process_dataset(dataset)
+        # Try to load cached dataset
+        processed_dataset = None
+        if not self.args.no_cache:
+            processed_dataset = cache.get_cached_dataset(dataset_config)
+
+        if processed_dataset is None:
+            # No cache found, process dataset
+            print("\nNo cached dataset found, processing from scratch...")
+
+            # Load dataset
+            dataset = self._load_dataset()
+
+            # Setup model with LoRA
+            lora_config = LoRAConfiguration(
+                rank=self.args.lora_r,
+                alpha=self.args.lora_alpha,
+                dropout=self.args.lora_dropout,
+            )
+
+            self.model_manager.load_base_model()
+            self.model_manager.apply_lora_adapter(lora_config)
+            self.model_manager.prepare_for_training()
+
+            # Process dataset
+            processor = ConversationProcessor(
+                self.model_manager.tokenizer, self.args.max_length
+            )
+            dataset_processor = DatasetProcessor(
+                processor, self.args.dataset_batch_size
+            )
+            processed_dataset = dataset_processor.process_dataset(dataset)
+
+            # Save to cache
+            cache.save_dataset(processed_dataset, dataset_config)
+        else:
+            # Using cached dataset, still need to setup model
+            print("\nUsing cached dataset, setting up model...")
+
+            # Setup model with LoRA
+            lora_config = LoRAConfiguration(
+                rank=self.args.lora_r,
+                alpha=self.args.lora_alpha,
+                dropout=self.args.lora_dropout,
+            )
+
+            self.model_manager.load_base_model()
+            self.model_manager.apply_lora_adapter(lora_config)
+            self.model_manager.prepare_for_training()
 
         # Validate dataset
         DatasetValidator.validate(processed_dataset, self.args.max_length)
@@ -652,6 +837,9 @@ def parse_arguments():
     mode_group.add_argument(
         "--inference", action="store_true", help="Run in inference mode."
     )
+    mode_group.add_argument(
+        "--clear-cache", action="store_true", help="Clear the dataset cache."
+    )
 
     # Model configuration
     parser.add_argument(
@@ -691,6 +879,11 @@ def parse_arguments():
         help="Batch size for dataset processing (different from training batch size).",
     )
     parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Force dataset reprocessing, ignoring any cached version.",
+    )
+    parser.add_argument(
         "--gradient-accumulation-steps",
         type=int,
         default=8,
@@ -724,6 +917,14 @@ def parse_arguments():
 def main():
     """Main entry point."""
     args = parse_arguments()
+
+    # Handle cache clearing
+    if args.clear_cache:
+        if not args.output_dir:
+            raise ValueError("You must provide --output-dir to clear cache.")
+        cache = DatasetCache(args.output_dir)
+        cache.clear_cache()
+        return
 
     # Validate arguments
     if args.train and not args.jsonl_file:
