@@ -175,9 +175,10 @@ class DatabaseManager:
         return """
         CREATE TABLE IF NOT EXISTS sync_state (
             channel_id TEXT PRIMARY KEY,
-            last_sync_ts TEXT,
+            last_sync_ts REAL,
             last_sync_cursor TEXT,
             is_fully_synced BOOLEAN DEFAULT 0,
+            last_incremental_sync_ts REAL,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
@@ -789,45 +790,65 @@ class SyncStateManager:
 
     def get_channels_to_sync(
         self,
-    ) -> List[Tuple[str, str, Optional[str], Optional[str], bool]]:
-        """Get all channels that need syncing."""
+    ) -> List[Tuple[str, str, Optional[float], Optional[str], bool]]:
+        """Get all channels that need syncing.
+        
+        Returns channels that either:
+        1. Have never been fully synced (is_fully_synced = 0 or NULL)
+        2. Have been fully synced but need incremental updates (last_incremental_sync_ts < last_sync_ts)
+        """
         self.sync_cur.execute(
             """
             SELECT c.id, c.name, s.last_sync_ts, s.last_sync_cursor, s.is_fully_synced
             FROM channels c
             LEFT JOIN sync_state s ON c.id = s.channel_id
-            ORDER BY s.last_sync_ts ASC NULLS FIRST
+            WHERE s.is_fully_synced = 0 
+               OR s.is_fully_synced IS NULL
+               OR (s.last_incremental_sync_ts IS NULL OR s.last_incremental_sync_ts < s.last_sync_ts)
+            ORDER BY s.last_sync_ts ASC
         """
         )
         return self.sync_cur.fetchall()
 
     def update_sync_state(
-        self, channel_id: str, timestamp: float, cursor: Optional[str]
+        self, channel_id: str, timestamp: float, cursor: Optional[str], is_incremental: bool = False
     ) -> None:
         """Update the sync state for a channel."""
-        self.sync_cur.execute(
-            """
-            INSERT OR REPLACE INTO sync_state
-            (channel_id, last_sync_ts, last_sync_cursor, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-        """,
-            (channel_id, str(timestamp), cursor),
-        )
+        if is_incremental:
+            self.sync_cur.execute(
+                """
+                UPDATE sync_state
+                SET last_incremental_sync_ts = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE channel_id = ?
+            """,
+                (timestamp, channel_id),
+            )
+        else:
+            self.sync_cur.execute(
+                """
+                INSERT OR REPLACE INTO sync_state
+                (channel_id, last_sync_ts, last_sync_cursor, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+                (channel_id, timestamp, cursor),
+            )
         self.db.conn.commit()
 
     def mark_channel_fully_synced(
         self, channel_id: str, oldest_timestamp: float
     ) -> None:
-        """Mark a channel as fully synced."""
+        """Mark a channel as fully synced and clear its cursor."""
         self.sync_cur.execute(
             """
             UPDATE sync_state
             SET is_fully_synced = 1,
                 last_sync_ts = ?,
+                last_sync_cursor = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE channel_id = ?
         """,
-            (str(oldest_timestamp), channel_id),
+            (oldest_timestamp, channel_id),
         )
         self.db.conn.commit()
 
@@ -929,7 +950,7 @@ class MessageManager:
                         continue
 
                     # Fetch and process messages
-                    messages, next_cursor = self._fetch_messages(ch_id, state.cursor)
+                    messages, next_cursor = self._fetch_messages(ch_id, state.cursor, state)
                     if messages:
                         # Process messages and update state
                         msgs_processed, latest_ts, oldest_ts = (
@@ -946,7 +967,7 @@ class MessageManager:
                             )
 
                     # Update sync state and handle transitions
-                    self._handle_sync_transition(
+                    channels_processed = self._handle_sync_transition(
                         ch_id, state, next_cursor, channels_processed
                     )
 
@@ -976,7 +997,7 @@ class MessageManager:
             raise
 
     def _fetch_messages(
-        self, channel_id: str, cursor: Optional[str]
+        self, channel_id: str, cursor: Optional[str], state: ChannelSyncState
     ) -> Tuple[List[Dict], Optional[str]]:
         """Fetch a page of messages from a channel."""
         params = {
@@ -984,12 +1005,17 @@ class MessageManager:
             "channel": channel_id,
             "limit": 200,
         }
+        
+        # Add timestamp parameters based on sync direction
+        if state.sync_direction == "forward" and state.latest_ts:
+            params["latest"] = str(state.latest_ts)
+        elif state.sync_direction == "backward" and state.oldest_ts:
+            params["oldest"] = str(state.oldest_ts)
+            
         if cursor:
             params["cursor"] = cursor
 
-        url = (
-            f"https://{self.slack.config.subdomain}.slack.com/api/conversations.history"
-        )
+        url = f"https://{self.slack.config.subdomain}.slack.com/api/conversations.history"
         if self.slack.config.verbose:
             logging.debug(f"GET {url}  cursor={cursor}")
             self.slack._print_curl_command("GET", url, {}, params=params)
@@ -998,12 +1024,10 @@ class MessageManager:
             r = self.slack.session.get(url, params=params)
             r.raise_for_status()
             j = r.json()
-            return j.get("messages", []), j.get("response_metadata", {}).get(
-                "next_cursor"
-            )
+            return j.get("messages", []), j.get("response_metadata", {}).get("next_cursor")
         except Exception as e:
             logging.error(f"Error fetching messages for channel {channel_id}: {e}")
-            return [], cursor
+            return [], None  # Return None cursor on error to prevent infinite retry
 
     def _print_progress(
         self,
@@ -1035,16 +1059,32 @@ class MessageManager:
         state: ChannelSyncState,
         next_cursor: Optional[str],
         channels_processed: int,
-    ) -> None:
-        """Handle sync state transitions and updates."""
+    ) -> int:
+        """Handle sync state transitions and updates.
+        
+        Returns:
+            Updated channels_processed count
+        """
         if state.sync_direction == "forward":
             if not next_cursor:
-                # End of forward sync, switch to backward
-                state.switch_to_backward_sync()
+                # End of forward sync
                 if state.latest_ts:
+                    # Update incremental sync timestamp
                     self.sync_state_manager.update_sync_state(
-                        channel_id, state.latest_ts, None
+                        channel_id, state.latest_ts, None, is_incremental=True
                     )
+                
+                if not state.is_fully_synced:
+                    # Switch to backward sync for full history
+                    state.switch_to_backward_sync()
+                else:
+                    # Channel is already fully synced, mark as complete
+                    state.is_complete = True
+                    channels_processed += 1
+                    if not self.slack.config.verbose:
+                        print(
+                            f"  Completed forward sync for #{state.name}: {state.messages} messages"
+                        )
             else:
                 # Continue forward sync
                 state.cursor = next_cursor
@@ -1055,7 +1095,7 @@ class MessageManager:
         else:  # backward sync
             if not next_cursor:
                 # End of backward sync
-                if state.oldest_ts and not state.is_fully_synced:
+                if state.oldest_ts:
                     self.sync_state_manager.mark_channel_fully_synced(
                         channel_id, state.oldest_ts
                     )
@@ -1065,6 +1105,14 @@ class MessageManager:
                         print(
                             f"  Completed backwards sync for #{state.name}: {state.messages} messages"
                         )
+                else:
+                    # No messages found, mark as complete
+                    state.is_complete = True
+                    channels_processed += 1
+                    if not self.slack.config.verbose:
+                        print(
+                            f"  Completed empty channel #{state.name}"
+                        )
             else:
                 # Continue backward sync
                 state.cursor = next_cursor
@@ -1072,6 +1120,8 @@ class MessageManager:
                     self.sync_state_manager.update_sync_state(
                         channel_id, state.oldest_ts, next_cursor
                     )
+        
+        return channels_processed
 
 
 class UserManager:
