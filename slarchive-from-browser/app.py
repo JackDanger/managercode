@@ -7,6 +7,8 @@ import json
 import re
 import logging
 import sys
+import os
+from datetime import datetime
 
 DB_PATH = "./db.sqlite3"
 
@@ -474,6 +476,128 @@ def fetch_channel_history(session, base_url, token, db_conn, rate_limit, verbose
         raise
 
 
+def export_for_axolotl(db_conn, output_dir):
+    """Export the database contents into a format suitable for Axolotl fine-tuning."""
+    import os
+    import json
+    from datetime import datetime
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    cur = db_conn.cursor()
+    
+    # Get all channels
+    cur.execute("SELECT id, name FROM channels")
+    channels = cur.fetchall()
+    
+    total_conversations = 0
+    
+    # Create a dataset file for each channel
+    for channel_id, channel_name in channels:
+        # Get all messages for this channel, ordered by timestamp
+        cur.execute("""
+            SELECT raw_json 
+            FROM messages 
+            WHERE channel_id = ? 
+            ORDER BY ts ASC
+        """, (channel_id,))
+        
+        current_conversation = []
+        last_ts = None
+        conversations = []
+        
+        for (raw_json,) in cur.fetchall():
+            msg = json.loads(raw_json)
+            
+            # Skip messages without text
+            if not msg.get('text'):
+                continue
+            
+            # Get message timestamp
+            ts = float(msg.get('ts', 0))
+            
+            # Start a new conversation if:
+            # 1. This is the first message
+            # 2. There's a significant time gap (> 1 hour)
+            if last_ts is None or ts - last_ts > 3600:  # 1 hour gap
+                # Save previous conversation if it exists
+                if current_conversation:
+                    conversations.append({
+                        "messages": current_conversation
+                    })
+                
+                # Start new conversation
+                current_conversation = []
+            
+            # Add message to current conversation
+            current_conversation.append({
+                "role": "user" if msg.get('user') else "assistant",
+                "content": msg['text']
+            })
+            
+            last_ts = ts
+        
+        # Add the last conversation
+        if current_conversation:
+            conversations.append({
+                "messages": current_conversation
+            })
+        
+        # Skip channels with no conversations
+        if not conversations:
+            continue
+        
+        # Create the dataset file
+        dataset = {
+            "type": "conversation",
+            "conversations": conversations,
+            "channel": channel_name,
+            "channel_id": channel_id
+        }
+        
+        # Write to file
+        safe_name = "".join(c if c.isalnum() else "_" for c in channel_name)
+        filename = f"{safe_name}_{channel_id}.json"
+        output_path = os.path.join(output_dir, filename)
+        
+        with open(output_path, 'w') as f:
+            json.dump(dataset, f, indent=2)
+        
+        total_conversations += len(conversations)
+        print(f"Exported {len(conversations)} conversations from #{channel_name} to {output_path}")
+    
+    # Create a metadata file
+    metadata = {
+        "export_date": datetime.now().isoformat(),
+        "total_conversations": total_conversations,
+        "channels": len(channels),
+        "format": "axolotl-conversation",
+        "version": "1.0",
+        "channel_list": [name for _, name in channels]
+    }
+    
+    # Create a dataset config file for Axolotl
+    dataset_config = {
+        "datasets": [
+            {
+                "path": os.path.join(output_dir, f"{safe_name}_{channel_id}.json"),
+                "type": "conversation"
+            }
+            for channel_id, channel_name in channels
+        ]
+    }
+    
+    with open(os.path.join(output_dir, "metadata.json"), 'w') as f:
+        json.dump(metadata, f, indent=2)
+    
+    with open(os.path.join(output_dir, "axolotl_config.json"), 'w') as f:
+        json.dump(dataset_config, f, indent=2)
+    
+    print(f"\nExported {total_conversations} total conversations from {len(channels)} channels")
+    print(f"To train on all channels, use the generated axolotl_config.json")
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Archive Slack channels via in-browser endpoints"
@@ -509,10 +633,23 @@ def main():
         "--browse-session-id",
         help="Browse session ID for API calls"
     )
+    p.add_argument(
+        "--dump-axolotl",
+        help="Export database contents for Axolotl fine-tuning to the specified directory"
+    )
     args = p.parse_args()
 
     lvl = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=lvl, format="%(asctime)s %(levelname)s %(message)s")
+
+    # DB
+    conn = setup_db()
+
+    # If dump-axolotl is specified, export the data and exit
+    if args.dump_axolotl:
+        export_for_axolotl(conn, args.dump_axolotl)
+        conn.close()
+        return
 
     base_url = f"https://{args.subdomain}.slack.com"
     # build session
@@ -521,9 +658,6 @@ def main():
         "User-Agent": "Mozilla/5.0 (compatible; SlackArchiver/1.0)",
         "Cookie": args.cookie,
     })
-
-    # DB
-    conn = setup_db()
 
     # Get internal token
     token = extract_token(session, base_url, args.verbose)
