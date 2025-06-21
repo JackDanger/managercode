@@ -132,7 +132,7 @@ class DatabaseManager:
         """
     def _get_messages_index_ddl(self) -> str:
         return """
-        CREATE INDEX subtype_idx ON messages(subtype);
+        CREATE INDEX IF NOT EXISTS subtype_idx ON messages(subtype);
         """
 
     def _get_users_schema(self) -> str:
