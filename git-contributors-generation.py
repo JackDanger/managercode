@@ -1,13 +1,24 @@
-import subprocess
+#!/usr/bin/env python3
+import argparse
+import re
 import os
+import subprocess
+import sys
 import json
 from collections import defaultdict
 from pathlib import Path
 
 
 def get_github_team_members(org, team):
+    members_url_cmd = "gh api /orgs/Datavant/teams/Engineering"
+    output = subprocess.check_output(members_url_cmd, shell=True).decode('utf-8')
+    team_data = json.loads(output)
+    members_url = team_data['members_url']
+    members_path = members_url.replace('https://api.github.com').split('{')[0]
+
+
     result = subprocess.run(
-        ["gh", "team", "list", "--org", org, "--json", "members", "--role", team],
+        ["gh", "api", members_path],
         capture_output=True,
         text=True,
         check=True,
@@ -16,27 +27,33 @@ def get_github_team_members(org, team):
     return [member['login'] for member in members_data['members']]
 
 
-def get_git_history(directory):
-    git_log_cmd = ["git", "-C", directory, "log", "--name-only", "--pretty=format:%an"]
+def get_git_history(directory, user_names, ignore, since):
+    user_files = defaultdict(set)
+
+    git_log_cmd = ["git", "-C", directory, "log", "--name-only", "--format=BREAK: %cl %an", f"--since={since}"]
     result = subprocess.run(git_log_cmd, capture_output=True, text=True, check=True)
     history = result.stdout.split('\n')
 
-    user_files = defaultdict(set)
-    current_user = None
+    current_author_email = None
+
+    breakline = re.compile('^BREAK: ([^ ]+) (.*)')
 
     for line in history:
-        if line.strip() == '':
-            current_user = None
-        elif not line.startswith(' '):
-            current_user = line.strip()
-        elif current_user:
-            user_files[current_user].add(line.strip())
+        match = breakline.match(line)
+
+        if match:
+            current_author_email = match.group(1)
+            user_names[current_author_email] = match.group(2)
+        elif line.strip() == '':
+            pass
+        elif current_author_email:
+            user_files[current_author_email].add(line.strip())
 
     return user_files
 
 
 def build_connection_graph(user_files):
-    connections = defaultdict(lambda: defaultdict(int))
+    connections = []
 
     users = list(user_files.keys())
     for i in range(len(users)):
@@ -44,41 +61,69 @@ def build_connection_graph(user_files):
             user_a, user_b = users[i], users[j]
             common_files = user_files[user_a] & user_files[user_b]
             if common_files:
-                connections[user_a][user_b] += len(common_files)
-                connections[user_b][user_a] += len(common_files)
+                connections.append({
+                    'source': user_a,
+                    'target': user_b,
+                    'value': len(common_files),
+                })
 
     return connections
 
 
 def main():
-    org = sys.argv[1]
-    repo_dir = sys.argv[2]
-    team = None
-    if len(sys.argv) > 3:
-        team = sys.argv[3]
+    parser = argparse.ArgumentParser(description='Generate git contributor graph')
 
+    parser.add_argument('-d', '--directory', help='parent directory of all git repos')
+    parser.add_argument('-o', '--organization', required=True, help='GitHub organization name')
+    parser.add_argument('-t', '--team', help='GitHub team name')
+    parser.add_argument('-i', '--ignore', nargs='+', default=[], help='List of usernames to ignore (e.g. "-i ansible root")')
+    parser.add_argument('-s', '--since', default='90 days ago', help='how far back to analyze')
+
+    args = parser.parse_args()
+
+    directory = args.directory
+    organization = args.organization
+    team = args.team
+    ignore = args.ignore
+    since_date = args.since
 
     # Get GitHub team members
     if team is not None:
-        team_members = get_github_team_members(org, team)
+        team_members = get_github_team_members(organization, team)
 
+    # Make a mapping of commit emails to names in case we want to show those during rendering
+    user_names = dict()
     # Get git history of all repos in the directory
     user_files = defaultdict(set)
-    for repo in Path(repo_dir).iterdir():
+    for repo in Path(directory).iterdir():
         if repo.is_dir() and (repo / ".git").exists():
-            user_files = get_git_history(str(repo))
-            for user, files in user_files.items():
-                user_files[user].update(files)
+            history = get_git_history(str(repo), user_names, ignore=ignore, since='90 days ago')
+            for user, files in history.items():
+                for filename in files:
+                    file = f'{repo}/{filename}'
+                    user_files[user].add(file)
 
     if team is not None:
         # Filter only team members
         user_files = {user: files for user, files in user_files.items() if user in team_members}
 
+
+    # Remove ignored users
+    for ignored in ignore:
+        if ignored in user_files:
+            del user_files[ignored]
+        if ignored in user_names:
+            del user_names[ignored]
+
     # Build connection graph
     connection_graph = build_connection_graph(user_files)
+    data = {
+        'nodes': [ { 'id': email, 'group': 1, 'count': len(user_files[email])} for email in user_files],
+        'links': connection_graph,
+    }
 
     # Print JSON file
-    json.dump(connection_graph, sys.stdout, indent=2)
+    json.dump(data, sys.stdout, indent=2)
 
 
 if __name__ == "__main__":

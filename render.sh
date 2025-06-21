@@ -23,7 +23,7 @@ function main() {
   # make a copy of all assets into this new subdirectory
   mkdir -p $deploy_dir
   cp ${filename} ${deploy_dir}/graphData.json
-  cp index.html.template ${deploy_dir}/index.html
+  cp index.html ${deploy_dir}/index.html
   cp force-graph.js ${deploy_dir}/
   cp adjacency-matrix.js ${deploy_dir}/
   cp d3*.js ${deploy_dir}/
@@ -43,7 +43,7 @@ deploy_to_s3() {
   set -x
   local parameterized_name=$1
   local s3_path=$2
-  aws s3 cp --recursive ${parameterized_name}.gen ${s3_path}
+  aws s3 cp --recursive ${parameterized_name}.gen ${s3_path}  --acl public-read
   echo "open ${s3_path}/index.html"
 }
 

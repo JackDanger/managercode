@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Force-Directed Graph</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            overflow: hidden;
+        }
+        #search {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 5px;
+            z-index: 10;
+        }
+        .tooltip {
+            position: absolute;
+            text-align: center;
+            width: 80px;
+            height: 28px;
+            padding: 2px;
+            font: 12px sans-serif;
+            background: lightgray;
+            border: 0;
+            border-radius: 8px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <input type="text" id="search" placeholder="Search node..." />
+
+    <svg width="100%" height="100%"></svg>
+
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script>
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+
+        const svg = d3.select("svg")
+            .attr("width", width)
+            .attr("height", height);
+
+        const tooltip = d3.select("body").append("div")
+            .attr("class", "tooltip")
+            .style("opacity", 0);
+
+        d3.json("graphData.json").then(data => {
+            const simulation = d3.forceSimulation(data.nodes)
+                .force("link", d3.forceLink(data.links).id(d => d.id).distance(100))
+                .force("charge", d3.forceManyBody().strength(-20))
+                .force("center", d3.forceCenter(width / 2, height / 2))
+                .force("collision", d3.forceCollide().radius(d => Math.sqrt(d.count) + 5));
+
+            const link = svg.append("g")
+                .attr("class", "links")
+                .selectAll("line")
+                .data(data.links)
+                .enter().append("line")
+                .attr("stroke", "#999")
+                .attr("stroke-opacity", 0.6)
+                .attr("stroke-width", d => Math.sqrt(d.value));
+
+            const node = svg.append("g")
+                .attr("class", "nodes")
+                .selectAll("g")
+                .data(data.nodes)
+                .enter().append("g")
+                .call(drag(simulation));
+
+            const circles = node.append("circle")
+                .attr("r", d => Math.sqrt(d.count))
+                .attr("fill", d => d3.schemeCategory10[d.group % 10]);
+
+            const labels = node.append("text")
+                .attr("dy", -3)
+                .attr("text-anchor", "middle")
+                .text(d => d.id)
+                .attr("font-size", 10)
+                .attr("fill", "#555");
+
+            node.append("title")
+                .text(d => d.id);
+
+            node.on("mouseover", (event, d) => {
+                tooltip.transition()
+                    .duration(200)
+                    .style("opacity", .9);
+                tooltip.html(`ID: ${d.id}<br>Group: ${d.group}<br>Count: ${d.count}`)
+                    .style("left", (event.pageX + 5) + "px")
+                    .style("top", (event.pageY - 28) + "px");
+            })
+            .on("mouseout", d => {
+                tooltip.transition()
+                    .duration(500)
+                    .style("opacity", 0);
+            });
+
+            simulation.on("tick", () => {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+
+                node
+                    .attr("transform", d => `translate(${d.x = Math.max(Math.sqrt(d.count), Math.min(width - Math.sqrt(d.count), d.x))}, ${d.y = Math.max(Math.sqrt(d.count), Math.min(height - Math.sqrt(d.count), d.y))})`);
+            });
+
+            d3.select("#search").on("input", function() {
+                const term = this.value.toLowerCase();
+                const matchedNodes = data.nodes.filter(d => d.id.toLowerCase().includes(term));
+
+                node.select("circle").attr("stroke", d => d.id.toLowerCase().includes(term) ? "black" : null)
+                    .attr("stroke-width", d => d.id.toLowerCase().includes(term) ? 2 : null);
+
+                if (matchedNodes.length === 1) {
+                    const matchedNode = matchedNodes[0];
+                    matchedNode.fx = width / 2;
+                    matchedNode.fy = height / 2;
+                    simulation.alpha(1).restart();
+                } else {
+                    data.nodes.forEach(d => {
+                        d.fx = null;
+                        d.fy = null;
+                    });
+                    simulation.alpha(1).restart();
+                }
+            });
+
+            function drag(simulation) {
+                return d3.drag()
+                    .on("start", event => {
+                        if (!event.active) simulation.alphaTarget(0.3).restart();
+                        event.subject.fx = event.subject.x;
+                        event.subject.fy = event.subject.y;
+                    })
+                    .on("drag", event => {
+                        event.subject.fx = event.x;
+                        event.subject.fy = event.y;
+                    })
+                    .on("end", event => {
+                        if (!event.active) simulation.alphaTarget(0);
+                        event.subject.fx = null;
+                        event.subject.fy = null;
+                    });
+            }
+        });
+    </script>
+</body>
+</html>
