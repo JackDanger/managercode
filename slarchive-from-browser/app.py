@@ -707,7 +707,10 @@ class MessageManager:
                     'messages': 0,
                     'pages': 0,
                     'is_complete': False,
-                    'is_fully_synced': bool(is_fully_synced)
+                    'is_fully_synced': bool(is_fully_synced),
+                    'latest_ts': None,
+                    'oldest_ts': None,
+                    'sync_direction': 'forward' if last_cursor else 'backward'
                 }
                 for ch_id, ch_name, _, last_cursor, is_fully_synced in channels_to_sync
             }
@@ -727,6 +730,7 @@ class MessageManager:
                         logging.info(f"Fetching history for #{ch_name} ({ch_id})")
                         if cursor:
                             logging.info(f"  Resuming from cursor {cursor}")
+                        logging.info(f"  Sync direction: {state['sync_direction']}")
 
                     # Fetch one page of messages
                     params = {
@@ -737,15 +741,24 @@ class MessageManager:
                     if cursor:
                         params["cursor"] = cursor
 
+                    # Store current cursor before making the request
+                    current_cursor = cursor
+
                     url = f"https://{self.slack.config.subdomain}.slack.com/api/conversations.history"
                     if self.slack.config.verbose:
                         logging.debug(f"GET {url}  cursor={cursor}")
                         self.slack._print_curl_command("GET", url, {}, params=params)
 
-                    r = self.slack.session.get(url, params=params)
-                    r.raise_for_status()
-                    j = r.json()
-                    msgs = j.get("messages", [])
+                    try:
+                        r = self.slack.session.get(url, params=params)
+                        r.raise_for_status()
+                        j = r.json()
+                        msgs = j.get("messages", [])
+                    except Exception as e:
+                        logging.error(f"Error fetching messages for channel {ch_name}: {e}")
+                        # Restore cursor on error
+                        state['cursor'] = current_cursor
+                        continue
 
                     if msgs:
                         # Find the latest and oldest timestamps
@@ -769,6 +782,12 @@ class MessageManager:
                         if latest_ts is None or oldest_ts is None:
                             logging.warning(f"No valid timestamps in page {state['pages']} for channel {ch_name} ({ch_id})")
                             continue
+
+                        # Update state timestamps
+                        if state['latest_ts'] is None or latest_ts > state['latest_ts']:
+                            state['latest_ts'] = latest_ts
+                        if state['oldest_ts'] is None or oldest_ts < state['oldest_ts']:
+                            state['oldest_ts'] = oldest_ts
 
                         state['pages'] += 1
                         try:
@@ -833,49 +852,69 @@ class MessageManager:
 
                     self.db.conn.commit()
 
-                    # Update sync state
-                    if msgs:
-                        try:
-                            # Use both timestamps for sync state
-                            if latest_ts and oldest_ts:
-                                # Get next cursor before updating sync state
-                                next_cursor = j.get("response_metadata", {}).get("next_cursor")
+                    # Get next cursor and update sync state
+                    next_cursor = j.get("response_metadata", {}).get("next_cursor")
+                    
+                    if state['sync_direction'] == 'forward':
+                        if not next_cursor:
+                            # End of forward sync, switch to backward
+                            state['sync_direction'] = 'backward'
+                            state['cursor'] = None
+                            # Store the latest timestamp we've seen for backward sync
+                            if state['latest_ts']:
                                 sync_cur.execute(
                                     """
                                     INSERT OR REPLACE INTO sync_state
                                     (channel_id, last_sync_ts, last_sync_cursor, updated_at)
                                     VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                                 """,
-                                    (ch_id, str(latest_ts), next_cursor),  # Store next_cursor, not current cursor
+                                    (ch_id, str(state['latest_ts']), None),
                                 )
                                 self.db.conn.commit()
-                        except Exception as e:
-                            logging.warning(f"Error updating sync state for channel {ch_name} ({ch_id}): {e}")
-
-                    # Get next cursor and check if channel is complete
-                    next_cursor = j.get("response_metadata", {}).get("next_cursor")
-                    if not next_cursor:
-                        # Only mark as fully synced if we were going backwards (no cursor)
-                        if not cursor and not state['is_fully_synced']:
+                        else:
+                            # Continue forward sync
+                            state['cursor'] = next_cursor
                             sync_cur.execute(
                                 """
-                                UPDATE sync_state
-                                SET is_fully_synced = 1, updated_at = CURRENT_TIMESTAMP
-                                WHERE channel_id = ?
+                                INSERT OR REPLACE INTO sync_state
+                                (channel_id, last_sync_ts, last_sync_cursor, updated_at)
+                                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
                             """,
-                                (ch_id,),
+                                (ch_id, str(state['latest_ts']), next_cursor),
                             )
                             self.db.conn.commit()
-                            state['is_fully_synced'] = True
-                            channels_processed += 1
-                            if not self.slack.config.verbose:
-                                print(f"  Completed backwards sync for #{ch_name}: {state['messages']} messages")
+                    else:  # backward sync
+                        if not next_cursor:
+                            # End of backward sync, check if we're fully synced
+                            if state['oldest_ts'] and not state['is_fully_synced']:
+                                sync_cur.execute(
+                                    """
+                                    UPDATE sync_state
+                                    SET is_fully_synced = 1,
+                                        last_sync_ts = ?,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    WHERE channel_id = ?
+                                """,
+                                    (str(state['oldest_ts']), ch_id),
+                                )
+                                self.db.conn.commit()
+                                state['is_fully_synced'] = True
+                                channels_processed += 1
+                                if not self.slack.config.verbose:
+                                    print(f"  Completed backwards sync for #{ch_name}: {state['messages']} messages")
+                            state['is_complete'] = True
                         else:
-                            # We've reached the end of forward sync, start backwards sync
-                            state['cursor'] = None
-                            continue
-
-                    state['cursor'] = next_cursor
+                            # Continue backward sync
+                            state['cursor'] = next_cursor
+                            sync_cur.execute(
+                                """
+                                INSERT OR REPLACE INTO sync_state
+                                (channel_id, last_sync_ts, last_sync_cursor, updated_at)
+                                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                            """,
+                                (ch_id, str(state['oldest_ts']), next_cursor),
+                            )
+                            self.db.conn.commit()
 
                     # Update sync run progress
                     sync_cur.execute(
