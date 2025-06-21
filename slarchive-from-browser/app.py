@@ -349,7 +349,9 @@ class ChannelManager:
         print(f"\nFound {channels_processed} channels")
         return channels_processed
 
-    def _fetch_channel_page(self, page: int, per_page: int, channel_type: str) -> List[Dict]:
+    def _fetch_channel_page(
+        self, page: int, per_page: int, channel_type: str
+    ) -> List[Dict]:
         """Fetch a single page of channels from Slack."""
         url = f"https://{self.slack.config.subdomain}.slack.com/api/search.modules.channels"
 
@@ -414,9 +416,7 @@ class ChannelManager:
         form_data.append("0")
 
         form_data.append(f"--{boundary}")
-        form_data.append(
-            'Content-Disposition: form-data; name="extra_message_data"'
-        )
+        form_data.append('Content-Disposition: form-data; name="extra_message_data"')
         form_data.append("")
         form_data.append("0")
 
@@ -443,9 +443,7 @@ class ChannelManager:
         form_data.append("false")
 
         form_data.append(f"--{boundary}")
-        form_data.append(
-            'Content-Disposition: form-data; name="include_files_shares"'
-        )
+        form_data.append('Content-Disposition: form-data; name="include_files_shares"')
         form_data.append("")
         form_data.append("1")
 
@@ -482,9 +480,7 @@ class ChannelManager:
         form_data.append(channel_type)
 
         form_data.append(f"--{boundary}")
-        form_data.append(
-            'Content-Disposition: form-data; name="exclude_my_channels"'
-        )
+        form_data.append('Content-Disposition: form-data; name="exclude_my_channels"')
         form_data.append("")
         form_data.append("0")
 
@@ -697,7 +693,9 @@ class MessageManager:
         has_more = True
         batch_oldest_ts = None
 
-        cur.execute("SELECT ever_fully_synced FROM channels WHERE id = ?", (channel_id,))
+        cur.execute(
+            "SELECT ever_fully_synced FROM channels WHERE id = ?", (channel_id,)
+        )
         row = cur.fetchone()
         ever_fully_synced = row[0] if row and row[0] is not None else False
 
@@ -708,13 +706,10 @@ class MessageManager:
 
         while has_more:
             # Fetch messages, starting from latest_cursor or beginning
-            messages, has_more, latest_ts = self._fetch_messages(
-                channel_id, latest_ts
-            )
+            messages, has_more, latest_ts = self._fetch_messages(channel_id, latest_ts)
 
             # If we got no messages, we're done with this channel
             fully_synced = not has_more
-
 
             # Check if we've reached previously synced messages
             if latest_synced_ts is not None:
@@ -733,15 +728,20 @@ class MessageManager:
                 )
                 messages_processed += batch_size
 
-                
-                oldest_readable = datetime.fromtimestamp(batch_oldest_ts).strftime('%Y-%m-%d %H:%M:%S')
-                latest_readable = datetime.fromtimestamp(latest_ts).strftime('%Y-%m-%d %H:%M:%S')
+                oldest_readable = datetime.fromtimestamp(batch_oldest_ts).strftime(
+                    "%Y-%m-%d"
+                )
+                latest_readable = datetime.fromtimestamp(latest_ts).strftime("%Y-%m-%d")
+                message_count = str(messages_processed).rjust(7)
                 print(
-                    f"#{channel_name}: Processed {batch_size} messages (total: {messages_processed}) - {oldest_readable} to {latest_readable}"
+                    f"#{channel_name.ljust(70)}: Processed {batch_size} messages (total: {message_count}) - {latest_readable} to {oldest_readable}"
                 )
 
             if fully_synced:
-                self.db.conn.execute("UPDATE channels SET ever_fully_synced = ? WHERE id = ?", (fully_synced, channel_id))
+                self.db.conn.execute(
+                    "UPDATE channels SET ever_fully_synced = ? WHERE id = ?",
+                    (fully_synced, channel_id),
+                )
                 self.db.conn.commit()
                 print(f"#{channel_name} fully synced")
 
