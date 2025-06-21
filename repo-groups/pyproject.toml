@@ -1,0 +1,12 @@
+[project]
+name = "repo-groups"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "black>=25.1.0",
+    "ipython>=8.36.0",
+    "matplotlib>=3.10.3",
+    "numpy>=2.2.5",
+]
