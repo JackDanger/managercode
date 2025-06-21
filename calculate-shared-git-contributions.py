@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import boto3
 import http.server
+import mimetypes
 import re
 import os
 import shutil
@@ -32,7 +34,9 @@ def get_github_team_members(org, team):
 
 def get_git_commit_counts(directory, user_commits, ignore, since):
 
-    counts = subprocess.run(f"git -C {directory} log --format='%ae' --since '{since}' | sort | uniq -c", shell=True, capture_output=True, text=True)
+    cmd = f"git -C {directory} log --format='%ae' --since '{since}' | sort | uniq -c"
+    print(cmd)
+    counts = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
     for line in counts.stdout.split("\n"):
         columns = re.split(r'\s+', line.strip(), maxsplit=1)
@@ -47,6 +51,7 @@ def get_git_files_changed(directory, user_names, ignore, since):
     user_files = defaultdict(set)
 
     git_log_cmd = ["git", "-C", directory, "log", "--name-only", "--format=BREAK: %cl %an", f"--since={since}"]
+    print(git_log_cmd)
     result = subprocess.run(git_log_cmd, capture_output=True, text=True, check=True)
     history = result.stdout.split('\n')
 
@@ -86,6 +91,42 @@ def build_connection_graph(user_files):
     return connections
 
 
+def upload_directory_to_s3(src_dir, publish):
+    # Extract bucket name and path from the publish parameter
+    if publish.startswith('s3://'):
+        publish = publish[5:]
+    bucket_name, s3_path = publish.split('/', 1)
+    
+    s3_client = boto3.client('s3')
+    bucket_location = s3_client.get_bucket_location(Bucket=bucket_name)
+    public_url = f"https://s3.{bucket_location['LocationConstraint']}.amazonaws.com/{bucket_name}/{s3_path}"
+
+    print(f"aws s3 cp --recursive --acl public-read {src_dir} {publish}")
+    
+    for root, dirs, files in os.walk(src_dir):
+        for file in files:
+            local_path = os.path.join(root, file)
+            relative_path = os.path.relpath(local_path, src_dir)
+            s3_file_path = os.path.join(s3_path, relative_path).replace("\\", "/")
+            
+            # Determine the content type
+            content_type, _ = mimetypes.guess_type(local_path)
+            if not content_type:
+                if file.endswith('.html'):
+                    content_type = 'text/html'
+                elif file.endswith('.json'):
+                    content_type = 'application/json'
+                else:
+                    content_type = 'binary/octet-stream'
+
+            s3_client.upload_file(
+                    local_path,
+                    bucket_name,
+                    s3_file_path,
+                    ExtraArgs={'ACL': 'public-read', 'ContentType': content_type})
+    return public_url
+
+
 def main():
     parser = argparse.ArgumentParser(description='Generate git contributor graph')
 
@@ -94,6 +135,7 @@ def main():
     parser.add_argument('-t', '--team', help='GitHub team name')
     parser.add_argument('-i', '--ignore', nargs='+', default=[], help='List of usernames to ignore (e.g. "-i ansible root")')
     parser.add_argument('-s', '--since', default='90 days ago', help='how far back to analyze')
+    parser.add_argument('-p', '--publish', help='an S3 bucket in which to publish the results')
 
     args = parser.parse_args()
 
@@ -102,8 +144,9 @@ def main():
     team = args.team
     ignore = args.ignore
     since_date = args.since
-    since_slug = since_date.replace(' ', '-')
+    publish = args.publish
 
+    since_slug = since_date.replace(' ', '-')
     output_dir = f'git.{since_slug}'
 
     # Get GitHub team members
@@ -118,13 +161,13 @@ def main():
     for repo in Path(directory).iterdir():
         if repo.is_dir() and (repo / ".git").exists():
 
-            files_changed = get_git_files_changed(str(repo), user_names, ignore=ignore, since='90 days ago')
+            files_changed = get_git_files_changed(str(repo), user_names, ignore=ignore, since=since_date)
             for user, files in files_changed.items():
                 for filename in files:
                     file = f'{repo}/{filename}'
                     user_files[user].add(file)
 
-            get_git_commit_counts(str(repo), user_commits, ignore=ignore, since='90 days ago')
+            get_git_commit_counts(str(repo), user_commits, ignore=ignore, since=since_date)
 
 
     if team is not None:
@@ -156,15 +199,20 @@ def main():
     with open(output_file, 'w') as f:
         json.dump(data, f, indent=2)
 
-    # Start the web server
-    os.chdir(output_dir)
-    PORT = 5050
+    if publish:
+        http_dir_guess = upload_directory_to_s3(output_dir, publish)
+        subprocess.run(['open', http_dir_guess + '/index.html'], capture_output=False, text=True, check=False)
+    else:
 
-    with socketserver.TCPServer(("", PORT), http.server.SimpleHTTPRequestHandler) as httpd:
+        # Start the web server
+        os.chdir(output_dir)
+        PORT = 5050
 
-        print(f"Serving at port {PORT}")
-        subprocess.run(['open', f'http://localhost:{PORT}/'], capture_output=False, text=True, check=False)
-        httpd.serve_forever()
+        with socketserver.TCPServer(("", PORT), http.server.SimpleHTTPRequestHandler) as httpd:
+
+            print(f"Serving at port {PORT}")
+            subprocess.run(['open', f'http://localhost:{PORT}/'], capture_output=False, text=True, check=False)
+            httpd.serve_forever()
 
   
 if __name__ == "__main__":

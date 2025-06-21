@@ -5,7 +5,8 @@
 ##### Visualize committer connectedness across all repos
 ```
 ./calculate-shared-git-contributions.py --directory /path/to/repos \
-                                        --ignore github noreply root ec2-user \
-                                        --since '90 days ago'
+                                        [--since '90 days ago'] \
+                                        [--ignore github noreply root ec2-user] \
+                                        [--publish s3://bucket/public/path]
 ```
 
