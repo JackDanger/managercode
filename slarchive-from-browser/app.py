@@ -218,44 +218,6 @@ class SlackClient:
         )
         return session
 
-    def _print_curl_command(
-        self,
-        method: str,
-        url: str,
-        headers: Dict,
-        data: Optional[str] = None,
-        params: Optional[Dict] = None,
-    ) -> None:
-        """Print a curl command equivalent to the HTTP request."""
-        cmd = ["curl"]
-
-        # Add params
-        if params:
-            param_str = "&".join(f"{k}={v}" for k, v in params.items())
-            cmd.append(f"'{url}?{param_str}'")
-        else:
-            cmd.append(f"'{url}'")
-
-        # Add session headers first
-        for key, value in self.session.headers.items():
-            cmd.append(f"-H '{key}: {value}'")
-
-        # Add request-specific headers
-        for key, value in headers.items():
-            cmd.append(f"-H '{key}: {value}'")
-
-        # Add method
-        if method.upper() != "GET":
-            cmd.append(f"-X {method}")
-
-        # Add data
-        if data:
-            cmd.append(f"--data-raw $'{data}'")
-
-        print("\nCurl command:")
-        print(" ".join(cmd))
-        print()
-
     def initialize(self) -> None:
         """Initialize the client by extracting the token."""
         self.token = self._extract_token()
@@ -541,9 +503,6 @@ class ChannelManager:
 
         if self.slack.config.verbose:
             logging.debug(f"POST {url}  page={page}")
-            self.slack._print_curl_command(
-                "POST", url, headers, data=data, params=params
-            )
 
         r = self.slack.session.post(url, headers=headers, data=data, params=params)
         r.raise_for_status()
@@ -683,7 +642,6 @@ class MessageManager:
         latest_synced_ts = row[0] if row and row[0] is not None else None
 
         # Get the oldest timestamp we've seen for this channel
-        cur = self.db.conn.cursor()
         cur.execute("SELECT min(ts) FROM messages WHERE channel_id = ?", (channel_id,))
         row = cur.fetchone()
         oldest_synced_ts = row[0] if row and row[0] is not None else None
@@ -737,7 +695,7 @@ class MessageManager:
                 http_timing_str = f"{float(http_timing):.2f}s"
                 db_timing_str = f"{float(start_time - time.time()):.2f}s"
                 print(
-                    f"#{channel_name.ljust(70)}: Processed {batch_size.ljust(3)} messages (total: {message_count}) - {latest_readable} to {oldest_readable} in http:{http_timing_str} db:{db_timing_str}"
+                    f"#{channel_name.ljust(70)}: Processed {str(batch_size).ljust(3)} messages (total: {message_count}) - {latest_readable} to {oldest_readable} in http:{http_timing_str} db:{db_timing_str}"
                 )
 
             if fully_synced:
@@ -866,9 +824,6 @@ class MessageManager:
 
             if self.slack.config.verbose:
                 logging.debug(f"POST {url}  latest_ts={latest_ts}")
-                self.slack._print_curl_command(
-                    "POST", url, headers, data=data, params=params
-                )
 
             return messages, has_more, next_latest, http_timing
 
@@ -929,7 +884,6 @@ class UserManager:
 
                 if self.slack.config.verbose:
                     logging.debug(f"POST {url}  marker={marker}")
-                    # self.slack._print_curl_command("POST", url, headers, data=data, params=params)
 
                 r = self.slack.session.post(
                     url, params=params, headers=headers, json=data
