@@ -210,7 +210,10 @@ class Exporter:
             SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
             FROM messages m
             WHERE m.channel_id = ?
-            AND m.subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+            AND (
+                   m.subtype is NULL
+                OR m.subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+            )
             ORDER BY m.ts
         """,
             (channel_id,),
@@ -492,7 +495,10 @@ class Exporter:
                     SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
                     FROM messages m
                     WHERE m.channel_id = ?
-                    AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+                    AND (
+                        m.subtype is NULL
+                        OR m.subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+                    )
                     ORDER BY m.ts
                     LIMIT ?
                     """,
@@ -505,7 +511,10 @@ class Exporter:
                     SELECT m.ts, m.user_id, m.thread_ts, m.subtype, m.reply_count
                     FROM messages m
                     WHERE m.channel_id = ?
-                    AND subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+                    AND (
+                        m.subtype is NULL
+                        OR m.subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+                    )
                     AND m.ts > ?
                     ORDER BY m.ts
                     LIMIT ?
