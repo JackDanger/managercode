@@ -732,9 +732,9 @@ class MessageManager:
                     "%Y-%m-%d"
                 )
                 latest_readable = datetime.fromtimestamp(latest_ts).strftime("%Y-%m-%d")
-                message_count = str(messages_processed).rjust(7)
+                message_count = str(messages_processed).rjust(5)
                 print(
-                    f"#{channel_name.ljust(70)}: Processed {batch_size} messages (total: {message_count}) - {latest_readable} to {oldest_readable}"
+                    f"#{channel_name.ljust(70)}: Processed {batch_size.ljust(3)} messages (total: {message_count}) - {latest_readable} to {oldest_readable}"
                 )
 
             if fully_synced:
