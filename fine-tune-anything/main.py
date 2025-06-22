@@ -766,12 +766,10 @@ class FineTuner:
         model_manager: ModelManager,
         training_config: TrainingConfiguration,
         checkpoint_config: CheckpointConfiguration,
-        resume_from_checkpoint: bool = True,
     ):
         self.model_manager = model_manager
         self.training_config = training_config
         self.checkpoint_config = checkpoint_config
-        self.resume_from_checkpoint = resume_from_checkpoint
 
         # Use scoped output directory for checkpoints
         self.scoped_output_dir = checkpoint_config.get_scoped_output_dir(
@@ -795,10 +793,11 @@ class FineTuner:
         """Execute the training process."""
         training_args = self._create_training_arguments()
 
-        # Check for existing checkpoints
-        checkpoint_dir = None
-        if self.resume_from_checkpoint:
-            checkpoint_dir = self._find_latest_checkpoint()
+        # Check for existing checkpoints or completed model
+        checkpoint_dir = self._find_latest_checkpoint()
+        completed_model_path = None
+        if not checkpoint_dir:
+            completed_model_path = self._find_completed_model()
 
         trainer = Trainer(
             model=self.model_manager.model,
@@ -808,13 +807,22 @@ class FineTuner:
             callbacks=callbacks,
         )
 
-        # Resume from checkpoint if found
+        # Resume from checkpoint or completed model
         if checkpoint_dir:
             print(f"\n{'='*80}")
             print(f"Found checkpoint: {checkpoint_dir}")
             print(f"Resuming training from checkpoint...")
             print(f"{'='*80}\n")
             trainer.train(resume_from_checkpoint=checkpoint_dir)
+        elif completed_model_path:
+            print(f"\n{'='*80}")
+            print(f"Found completed model: {completed_model_path}")
+            print(f"Loading existing adapter and continuing training...")
+            print(f"{'='*80}\n")
+            
+            # Load the existing adapter into the current model
+            self._load_existing_adapter(completed_model_path)
+            trainer.train()
         else:
             print("\nStarting training from scratch...")
             trainer.train()
@@ -824,6 +832,46 @@ class FineTuner:
         # Cleanup
         del trainer
         MemoryManager.cleanup()
+    
+    def _find_completed_model(self) -> Optional[str]:
+        """Find a completed model in the scoped output directory."""
+        scoped_path = Path(self.scoped_output_dir)
+        base_path = Path(self.training_config.output_dir)
+        
+        # Check scoped directory first
+        for path in [scoped_path, base_path]:
+            if path.exists():
+                adapter_file = path / "adapter_model.safetensors"
+                if adapter_file.exists():
+                    return str(path)
+        
+        return None
+    
+    def _load_existing_adapter(self, model_path: str):
+        """Load an existing adapter into the current model."""
+        try:
+            print(f"Loading existing adapter from: {model_path}")
+            
+            # The model should already have LoRA applied from the setup
+            # We need to load the trained weights into it
+            from peft import PeftModel
+            
+            # Get the base model (without the current LoRA)
+            base_model = self.model_manager.model.base_model if hasattr(self.model_manager.model, 'base_model') else self.model_manager.model
+            
+            # Load the existing adapter
+            self.model_manager.model = PeftModel.from_pretrained(base_model, model_path)
+            
+            # Re-prepare for training
+            self.model_manager.model.config.use_cache = False
+            if hasattr(self.model_manager.model, "enable_input_require_grads"):
+                self.model_manager.model.enable_input_require_grads()
+            
+            print("Successfully loaded existing adapter for continued training")
+            
+        except Exception as e:
+            print(f"Warning: Could not load existing adapter: {e}")
+            print("Continuing with fresh adapter...")
 
     def _find_latest_checkpoint(self) -> Optional[str]:
         """Find the latest checkpoint in the scoped output directory."""
@@ -1090,7 +1138,6 @@ class FineTuningApplication:
             self.model_manager,
             training_config,
             checkpoint_config,
-            resume_from_checkpoint=not self.args.no_resume,
         )
         fine_tuner.train(processed_dataset, callbacks=callbacks if callbacks else None)
 
@@ -1190,11 +1237,7 @@ def parse_arguments():
         action="store_true",
         help="Force dataset reprocessing, ignoring any cached version.",
     )
-    parser.add_argument(
-        "--no-resume",
-        action="store_true",
-        help="Start training from scratch, ignoring any existing checkpoints.",
-    )
+
     parser.add_argument(
         "--gradient-accumulation-steps",
         type=int,
