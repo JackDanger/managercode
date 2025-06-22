@@ -27,7 +27,7 @@ class ModelConfig:
 
     name: str
     use_4bit_quantization: bool = True
-    compute_dtype: torch.dtype = torch.float16
+    compute_dtype: torch.dtype = torch.bfloat16
     trust_remote_code: bool = True
 
 
@@ -904,7 +904,7 @@ class FineTuner:
             gradient_accumulation_steps=self.training_config.gradient_accumulation_steps,
             num_train_epochs=self.training_config.epochs,
             learning_rate=self.training_config.learning_rate,
-            fp16=True,
+            bf16=True,  # Use bf16 instead of fp16 for better stability with quantization
             remove_unused_columns=False,
             logging_steps=self.training_config.logging_steps,
             save_steps=self.training_config.save_steps,
