@@ -70,6 +70,47 @@ class TrainingConfiguration:
 
 
 @dataclass
+class CheckpointConfiguration:
+    """Configuration that affects checkpoint compatibility."""
+
+    model_name: str
+    max_sequence_length: int
+    batch_size: int
+    gradient_accumulation_steps: int
+    learning_rate: float
+    lora_r: int
+    lora_alpha: int
+    lora_dropout: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for hashing."""
+        return asdict(self)
+
+    def compute_hash(self) -> str:
+        """Compute a hash of the checkpoint-affecting configuration."""
+        config_str = json.dumps(self.to_dict(), sort_keys=True)
+        return hashlib.sha256(config_str.encode()).hexdigest()[
+            :12
+        ]  # Use first 12 chars
+
+    def get_scoped_output_dir(self, base_output_dir: str) -> str:
+        """Get output directory scoped by hyperparameters."""
+        config_hash = self.compute_hash()
+        base_path = Path(base_output_dir)
+
+        # Create a human-readable directory name with key parameters
+        scope_name = (
+            f"bs{self.batch_size}_"
+            f"gas{self.gradient_accumulation_steps}_"
+            f"lr{self.learning_rate:.0e}_"
+            f"seq{self.max_sequence_length}_"
+            f"lora{self.lora_r}_{config_hash}"
+        )
+
+        return str(base_path / scope_name)
+
+
+@dataclass
 class InferenceConfiguration:
     """Configuration for inference parameters."""
 
@@ -474,7 +515,7 @@ class DatasetProcessingConfig:
     model_name: str
     max_length: int
     dataset_batch_size: int
-    
+
     def __post_init__(self):
         # Convert to absolute path for consistent hashing
         self.jsonl_file = str(Path(self.jsonl_file).resolve())
@@ -537,7 +578,7 @@ class DatasetCache:
             # Check if cache exists
             metadata = self._load_metadata()
             print(f"Found {len(metadata)} cached entries")
-            
+
             if cache_key not in metadata:
                 print("No matching cache entry found")
                 return None
@@ -562,6 +603,7 @@ class DatasetCache:
         except Exception as e:
             print(f"Error loading cached dataset: {e}")
             import traceback
+
             traceback.print_exc()
             return None
 
@@ -600,6 +642,7 @@ class DatasetCache:
         except Exception as e:
             print(f"Error saving dataset to cache: {e}")
             import traceback
+
             traceback.print_exc()
 
     def clear_cache(self):
@@ -624,49 +667,54 @@ class DatasetCache:
 
 class PeriodicInferenceCallback(TrainerCallback):
     """Callback to run inference on a test prompt periodically during training."""
-    
-    def __init__(self, model_manager: ModelManager, test_prompt: str, 
-                 inference_steps: int, inference_config: InferenceConfiguration):
+
+    def __init__(
+        self,
+        model_manager: ModelManager,
+        test_prompt: str,
+        inference_steps: int,
+        inference_config: InferenceConfiguration,
+    ):
         self.model_manager = model_manager
         self.test_prompt = test_prompt
         self.inference_steps = inference_steps
         self.inference_config = inference_config
         self.initial_response = None
-    
+
     def on_step_end(self, args, state, control, **kwargs):
         """Run inference every N steps."""
         if state.global_step % self.inference_steps == 0 and state.global_step > 0:
             self._run_inference(state.global_step, kwargs.get("logs", {}))
-    
+
     def on_train_begin(self, args, state, control, **kwargs):
         """Run initial inference to establish baseline."""
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Running initial inference to establish baseline...")
-        print("="*80)
+        print("=" * 80)
         self.initial_response = self._run_inference(0, {})
-    
+
     def _run_inference(self, step: int, logs: Dict[str, float]) -> str:
         """Run inference and print results."""
         # Save the training mode
         training_mode = self.model_manager.model.training
         self.model_manager.model.eval()
-        
+
         try:
             # Format prompt
             messages = [{"role": "user", "content": self.test_prompt}]
             formatted_prompt = self.model_manager.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True
             )
-            
+
             # Generate response
             with torch.no_grad():
                 inputs = self.model_manager.tokenizer(
-                    formatted_prompt, 
+                    formatted_prompt,
                     return_tensors="pt",
                     truncation=True,
-                    max_length=2048  # Use a reasonable max length for the input
+                    max_length=2048,  # Use a reasonable max length for the input
                 ).to(self.model_manager.model.device)
-                
+
                 outputs = self.model_manager.model.generate(
                     **inputs,
                     max_new_tokens=self.inference_config.max_new_tokens,
@@ -676,34 +724,34 @@ class PeriodicInferenceCallback(TrainerCallback):
                     pad_token_id=self.model_manager.tokenizer.pad_token_id,
                     eos_token_id=self.model_manager.tokenizer.eos_token_id,
                 )
-                
+
                 response = self.model_manager.tokenizer.decode(
                     outputs[0], skip_special_tokens=True
                 )
-                
+
                 # Extract only the generated part
                 if formatted_prompt in response:
-                    response = response[len(formatted_prompt):].strip()
-            
+                    response = response[len(formatted_prompt) :].strip()
+
             # Print results
             print(f"\n{'='*80}")
             print(f"Inference at step {step}")
             if logs:
-                loss = logs.get('loss', 'N/A')
+                loss = logs.get("loss", "N/A")
                 print(f"Current loss: {loss}")
             print(f"{'='*80}")
             print(f"Prompt: {self.test_prompt}")
             print(f"{'-'*40}")
             print(f"Response: {response}")
-            
+
             if step == 0:
                 print(f"{'-'*40}")
                 print("(This is the baseline response before training)")
-            
+
             print(f"{'='*80}\n")
-            
+
             return response
-            
+
         finally:
             # Restore training mode
             if training_mode:
@@ -714,14 +762,36 @@ class FineTuner:
     """Manages the fine-tuning process."""
 
     def __init__(
-        self, model_manager: ModelManager, training_config: TrainingConfiguration, 
-        resume_from_checkpoint: bool = True
+        self,
+        model_manager: ModelManager,
+        training_config: TrainingConfiguration,
+        checkpoint_config: CheckpointConfiguration,
+        resume_from_checkpoint: bool = True,
     ):
         self.model_manager = model_manager
         self.training_config = training_config
+        self.checkpoint_config = checkpoint_config
         self.resume_from_checkpoint = resume_from_checkpoint
 
-    def train(self, dataset: Dataset, callbacks: Optional[List[TrainerCallback]] = None):
+        # Use scoped output directory for checkpoints
+        self.scoped_output_dir = checkpoint_config.get_scoped_output_dir(
+            training_config.output_dir
+        )
+
+        # Ensure the scoped directory exists
+        Path(self.scoped_output_dir).mkdir(parents=True, exist_ok=True)
+
+        print(f"\nCheckpoint configuration:")
+        print(f"- Base output dir: {training_config.output_dir}")
+        print(f"- Scoped output dir: {self.scoped_output_dir}")
+        print(f"- Config hash: {checkpoint_config.compute_hash()}")
+
+        # Save configuration for reference
+        self._save_checkpoint_config()
+
+    def train(
+        self, dataset: Dataset, callbacks: Optional[List[TrainerCallback]] = None
+    ):
         """Execute the training process."""
         training_args = self._create_training_arguments()
 
@@ -729,7 +799,7 @@ class FineTuner:
         checkpoint_dir = None
         if self.resume_from_checkpoint:
             checkpoint_dir = self._find_latest_checkpoint()
-        
+
         trainer = Trainer(
             model=self.model_manager.model,
             args=training_args,
@@ -748,19 +818,19 @@ class FineTuner:
         else:
             print("\nStarting training from scratch...")
             trainer.train()
-            
+
         self._save_results()
 
         # Cleanup
         del trainer
         MemoryManager.cleanup()
-    
+
     def _find_latest_checkpoint(self) -> Optional[str]:
-        """Find the latest checkpoint in the output directory."""
-        output_path = Path(self.training_config.output_dir)
+        """Find the latest checkpoint in the scoped output directory."""
+        output_path = Path(self.scoped_output_dir)
         if not output_path.exists():
             return None
-        
+
         # Look for checkpoint directories (format: checkpoint-STEP)
         checkpoints = []
         for item in output_path.iterdir():
@@ -770,10 +840,10 @@ class FineTuner:
                     checkpoints.append((step, str(item)))
                 except (IndexError, ValueError):
                     continue
-        
+
         if not checkpoints:
             return None
-        
+
         # Return the checkpoint with the highest step number
         checkpoints.sort(key=lambda x: x[0], reverse=True)
         return checkpoints[0][1]
@@ -781,7 +851,7 @@ class FineTuner:
     def _create_training_arguments(self) -> TrainingArguments:
         """Create training arguments from configuration."""
         return TrainingArguments(
-            output_dir=self.training_config.output_dir,
+            output_dir=self.scoped_output_dir,  # Use scoped directory
             per_device_train_batch_size=self.training_config.batch_size,
             gradient_accumulation_steps=self.training_config.gradient_accumulation_steps,
             num_train_epochs=self.training_config.epochs,
@@ -799,10 +869,60 @@ class FineTuner:
 
     def _save_results(self):
         """Save the trained model and adapter."""
+        # Save final model to both scoped and base directories
+        self.model_manager.save(self.scoped_output_dir)
         self.model_manager.save(self.training_config.output_dir)
-        print(
-            f"Training complete. Model & adapter saved to {self.training_config.output_dir}"
-        )
+
+        print(f"Training complete.")
+        print(f"- Checkpoints saved to: {self.scoped_output_dir}")
+        print(f"- Final model saved to: {self.training_config.output_dir}")
+        print(f"- Final model also saved to: {self.scoped_output_dir}")
+
+    def _save_checkpoint_config(self):
+        """Save checkpoint configuration to file."""
+        config_file = Path(self.scoped_output_dir) / "checkpoint_config.json"
+        with open(config_file, "w") as f:
+            json.dump(self.checkpoint_config.to_dict(), f, indent=2)
+
+    @staticmethod
+    def list_existing_configurations(base_output_dir: str) -> List[Dict[str, Any]]:
+        """List all existing checkpoint configurations in the base output directory."""
+        base_path = Path(base_output_dir)
+        if not base_path.exists():
+            return []
+
+        configurations = []
+        for item in base_path.iterdir():
+            if item.is_dir():
+                config_file = item / "checkpoint_config.json"
+                if config_file.exists():
+                    try:
+                        with open(config_file, "r") as f:
+                            config = json.load(f)
+
+                        # Count checkpoints
+                        checkpoint_count = len(
+                            [
+                                x
+                                for x in item.iterdir()
+                                if x.is_dir() and x.name.startswith("checkpoint-")
+                            ]
+                        )
+
+                        configurations.append(
+                            {
+                                "directory": str(item),
+                                "config": config,
+                                "checkpoint_count": checkpoint_count,
+                                "has_final_model": (
+                                    item / "adapter_model.safetensors"
+                                ).exists(),
+                            }
+                        )
+                    except (json.JSONDecodeError, FileNotFoundError):
+                        continue
+
+        return configurations
 
 
 class InferenceEngine:
@@ -941,24 +1061,36 @@ class FineTuningApplication:
             print(f"\nPeriodic inference enabled:")
             print(f"- Evaluation prompt: {self.args.eval_prompt}")
             print(f"- Evaluation frequency: every {self.args.eval_steps} steps")
-            
+
             inference_config = InferenceConfiguration(
                 max_new_tokens=self.args.max_new_tokens,
-                temperature=self.args.temperature
+                temperature=self.args.temperature,
             )
-            
+
             inference_callback = PeriodicInferenceCallback(
                 model_manager=self.model_manager,
                 test_prompt=self.args.eval_prompt,
                 inference_steps=self.args.eval_steps,
-                inference_config=inference_config
+                inference_config=inference_config,
             )
             callbacks.append(inference_callback)
 
+        checkpoint_config = CheckpointConfiguration(
+            model_name=self.args.model_name,
+            max_sequence_length=self.args.max_length,
+            batch_size=self.args.batch_size,
+            gradient_accumulation_steps=self.args.gradient_accumulation_steps,
+            learning_rate=self.args.learning_rate,
+            lora_r=self.args.lora_r,
+            lora_alpha=self.args.lora_alpha,
+            lora_dropout=self.args.lora_dropout,
+        )
+
         fine_tuner = FineTuner(
-            self.model_manager, 
+            self.model_manager,
             training_config,
-            resume_from_checkpoint=not self.args.no_resume
+            checkpoint_config,
+            resume_from_checkpoint=not self.args.no_resume,
         )
         fine_tuner.train(processed_dataset, callbacks=callbacks if callbacks else None)
 
@@ -1009,6 +1141,11 @@ def parse_arguments():
     )
     mode_group.add_argument(
         "--clear-cache", action="store_true", help="Clear the dataset cache."
+    )
+    mode_group.add_argument(
+        "--list-configs",
+        action="store_true",
+        help="List existing checkpoint configurations.",
     )
 
     # Model configuration
@@ -1085,18 +1222,18 @@ def parse_arguments():
     parser.add_argument(
         "--max-new-tokens", type=int, default=256, help="Max new tokens for inference."
     )
-    
+
     # Training inference monitoring
     parser.add_argument(
-        "--eval-prompt", 
-        type=str, 
-        help="Prompt to evaluate during training (optional). If provided, will run inference every N steps."
+        "--eval-prompt",
+        type=str,
+        help="Prompt to evaluate during training (optional). If provided, will run inference every N steps.",
     )
     parser.add_argument(
-        "--eval-steps", 
-        type=int, 
+        "--eval-steps",
+        type=int,
         default=50,
-        help="Number of training steps between evaluation prompts (default: 50)."
+        help="Number of training steps between evaluation prompts (default: 50).",
     )
 
     return parser.parse_args()
@@ -1112,6 +1249,38 @@ def main():
             raise ValueError("You must provide --output-dir to clear cache.")
         cache = DatasetCache(args.output_dir)
         cache.clear_cache()
+        return
+
+    # Handle listing configurations
+    if args.list_configs:
+        if not args.output_dir:
+            raise ValueError("You must provide --output-dir to list configurations.")
+
+        configurations = FineTuner.list_existing_configurations(args.output_dir)
+
+        if not configurations:
+            print(f"No checkpoint configurations found in {args.output_dir}")
+            return
+
+        print(
+            f"\nFound {len(configurations)} checkpoint configuration(s) in {args.output_dir}:\n"
+        )
+
+        for i, config_info in enumerate(configurations, 1):
+            config = config_info["config"]
+            print(f"{i}. Directory: {Path(config_info['directory']).name}")
+            print(f"   Model: {config['model_name']}")
+            print(f"   Batch size: {config['batch_size']}")
+            print(f"   Gradient accumulation: {config['gradient_accumulation_steps']}")
+            print(f"   Learning rate: {config['learning_rate']}")
+            print(f"   Max sequence length: {config['max_sequence_length']}")
+            print(
+                f"   LoRA: r={config['lora_r']}, alpha={config['lora_alpha']}, dropout={config['lora_dropout']}"
+            )
+            print(f"   Checkpoints: {config_info['checkpoint_count']}")
+            print(f"   Final model: {'✓' if config_info['has_final_model'] else '✗'}")
+            print()
+
         return
 
     # Validate arguments
