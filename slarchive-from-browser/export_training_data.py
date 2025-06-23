@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-Production script to export Slack Q&A data for fine-tuning.
+Export Slack Q&A data for fine-tuning.
 
 Usage:
-    python export_training_data.py [--max-pairs-per-channel N] [--output-dir DIR]
+    # Basic export
+    python export_training_data.py
+    
+    # Enhanced export with LLM
+    python export_training_data.py --enhance
+    
+    # Custom model for enhancement
+    python export_training_data.py --enhance --model microsoft/Phi-3-mini-4k-instruct
 """
 
 import argparse
@@ -11,14 +18,26 @@ import os
 import sys
 from datetime import datetime
 
-# Add the parent directory to the path if needed
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app import DatabaseManager
-from exporter import Exporter
+from exporter import Exporter, EnhancedExporter
+
 
 def main():
     parser = argparse.ArgumentParser(description="Export Slack Q&A data for LLM fine-tuning")
+    
+    parser.add_argument(
+        "--enhance",
+        action="store_true",
+        help="Use LLM enhancement for better training data"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="microsoft/Phi-3-mini-4k-instruct",
+        help="Model to use for enhancement (requires --enhance)"
+    )
     parser.add_argument(
         "--max-pairs-per-channel", 
         type=int, 
@@ -40,7 +59,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Check if database exists
     if not os.path.exists(args.db_path):
         print(f"Error: Database not found at {args.db_path}")
         print("Please run the importer first to create the database.")
@@ -51,8 +69,13 @@ def main():
     db = DatabaseManager(args.db_path)
     db.connect()
     
-    # Create exporter
-    exporter = Exporter(db)
+    # Create appropriate exporter
+    if args.enhance:
+        print(f"Using enhanced export with model: {args.model}")
+        exporter = EnhancedExporter(db, model_name=args.model)
+    else:
+        print("Using basic export")
+        exporter = Exporter(db)
     
     # Run export
     print(f"Output directory: {args.output_dir}")
@@ -61,12 +84,15 @@ def main():
     try:
         exporter.export_fine_tuning_data(args.output_dir, args.max_pairs_per_channel)
         
-        # Show the results
-        output_file = os.path.join(args.output_dir, "slack_qa_training.jsonl")
+        # Show results
+        output_file = os.path.join(
+            args.output_dir, 
+            "enhanced_qa_training.jsonl" if args.enhance else "slack_qa_training.jsonl"
+        )
         metadata_file = os.path.join(args.output_dir, "export_metadata.json")
         
         if os.path.exists(output_file):
-            file_size = os.path.getsize(output_file) / (1024 * 1024)  # MB
+            file_size = os.path.getsize(output_file) / (1024 * 1024)
             with open(output_file, 'r') as f:
                 line_count = sum(1 for _ in f)
             
@@ -75,6 +101,17 @@ def main():
             print(f"  File size: {file_size:.1f} MB")
             print(f"  Training examples: {line_count:,}")
             print(f"  Metadata: {metadata_file}")
+            
+            # Read metadata for enhancement stats
+            if args.enhance and os.path.exists(metadata_file):
+                import json
+                with open(metadata_file, 'r') as f:
+                    metadata = json.load(f)
+                    enhancements = metadata.get("enhancements", {})
+                    if enhancements:
+                        print(f"\nEnhancement statistics:")
+                        print(f"  Enhanced answers: {enhancements.get('enhanced_answers', 0)}")
+                        print(f"  Synthetic Q&A pairs: {enhancements.get('synthetic_pairs', 0)}")
             
             print("\nNext steps:")
             print("1. Review the export_metadata.json for statistics")
@@ -95,8 +132,8 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     finally:
-        # Close database connection
         db.close()
+
 
 if __name__ == "__main__":
     main() 

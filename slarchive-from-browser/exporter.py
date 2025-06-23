@@ -1,13 +1,5 @@
 """
-Simplified Slack Data Exporter for LLM Fine-Tuning
-
-This exporter creates high-quality Q&A training data from Slack conversations.
-
-Format:
-Each line in the JSONL output contains:
-{
-  "text": "<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n{answer}<|im_end|>"
-}
+Slack Q&A Exporter with optional LLM enhancement.
 
 Usage:
     from app import DatabaseManager
@@ -15,7 +7,14 @@ Usage:
     
     db = DatabaseManager()
     db.connect()
+    
+    # Basic export
     exporter = Exporter(db)
+    exporter.export_fine_tuning_data("./output")
+    
+    # Enhanced export with LLM
+    from exporter import EnhancedExporter
+    exporter = EnhancedExporter(db, model_name="microsoft/Phi-3-mini-4k-instruct")
     exporter.export_fine_tuning_data("./output")
 """
 
@@ -26,39 +25,52 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
+from dataclasses import dataclass
 
-class Exporter:
-    """Exports high-quality Q&A pairs from Slack for LLM fine-tuning."""
+
+@dataclass
+class QAPair:
+    question: str
+    answer: str
+    channel: str
+    quality_score: float = 0.0
+    metadata: Dict = None
+    
+    def to_training_format(self) -> str:
+        return f"<|im_start|>user\n{self.question}<|im_end|>\n<|im_start|>assistant\n{self.answer}<|im_end|>"
+    
+    def to_dict(self) -> Dict:
+        result = {"text": self.to_training_format()}
+        if self.metadata:
+            result.update(self.metadata)
+        return result
+
+
+class BaseExporter:
+    """Base exporter functionality shared by all exporters."""
 
     def __init__(self, db):
         self.db = db
 
     def export_fine_tuning_data(self, output_dir: str, max_pairs_per_channel: int = 100) -> None:
-        """Export high-quality Q&A pairs from Slack conversations.
-        
-        Args:
-            output_dir: Directory to save the JSONL file
-            max_pairs_per_channel: Maximum Q&A pairs to extract per channel
-        """
         os.makedirs(output_dir, exist_ok=True)
         
         channels = self._get_all_channels()
-        output_path = os.path.join(output_dir, "slack_qa_training.jsonl")
+        output_path = os.path.join(output_dir, self._get_output_filename())
         
         total_pairs = 0
         channel_stats = defaultdict(int)
         
         print(f"\nExporting Q&A training data from {len(channels)} channels...")
-        print(f"Maximum {max_pairs_per_channel} pairs per channel\n")
+        self._print_export_info(max_pairs_per_channel)
         
         with open(output_path, "w", encoding="utf-8") as f:
             for channel_id, channel_name in channels:
                 try:
-                    # Extract Q&A pairs from this channel
                     qa_pairs = self._extract_channel_qa_pairs(channel_id, channel_name, max_pairs_per_channel)
                     
                     for qa_pair in qa_pairs:
-                        f.write(json.dumps(qa_pair, ensure_ascii=False) + "\n")
+                        f.write(json.dumps(qa_pair.to_dict(), ensure_ascii=False) + "\n")
                         channel_stats[channel_name] += 1
                         total_pairs += 1
                     
@@ -69,25 +81,41 @@ class Exporter:
                     logging.error(f"Error processing channel {channel_name}: {str(e)}")
                     continue
         
-        # Write metadata
         self._write_export_metadata(output_dir, total_pairs, channel_stats)
         
         print(f"\nExport complete!")
         print(f"Total Q&A pairs: {total_pairs:,}")
         print(f"Output file: {output_path}")
+    
+    def _get_output_filename(self) -> str:
+        return "slack_qa_training.jsonl"
+    
+    def _print_export_info(self, max_pairs_per_channel: int = 100) -> None:
+        print(f"Maximum pairs per channel: {max_pairs_per_channel}")
 
     def _get_all_channels(self) -> List[Tuple[str, str]]:
-        """Get all channels from the database."""
         cur = self.db.conn.cursor()
         cur.execute("SELECT id, name FROM channels ORDER BY name")
         return cur.fetchall()
 
-    def _extract_channel_qa_pairs(self, channel_id: str, channel_name: str, max_pairs: int) -> List[Dict]:
-        """Extract high-quality Q&A pairs from a channel."""
+    def _extract_channel_qa_pairs(self, channel_id: str, channel_name: str, max_pairs: int) -> List[QAPair]:
+        qa_pairs = []
+        
+        # Extract from threads
+        thread_pairs = self._extract_thread_qa_pairs(channel_id, channel_name, max_pairs)
+        qa_pairs.extend(thread_pairs)
+        
+        # Extract from explanatory messages if needed
+        if len(qa_pairs) < max_pairs:
+            explanation_pairs = self._extract_explanation_pairs(channel_id, channel_name, max_pairs - len(qa_pairs))
+            qa_pairs.extend(explanation_pairs)
+        
+        return qa_pairs[:max_pairs]
+
+    def _extract_thread_qa_pairs(self, channel_id: str, channel_name: str, max_pairs: int) -> List[QAPair]:
         qa_pairs = []
         cur = self.db.conn.cursor()
         
-        # Query threads with good Q&A potential (2-10 replies)
         cur.execute(
             """
             SELECT m.ts, m.user_id, m.reply_count
@@ -101,67 +129,82 @@ class Exporter:
             ORDER BY m.reply_count DESC, m.ts DESC
             LIMIT ?
             """,
-            (channel_id, max_pairs * 2),  # Get extra for filtering
+            (channel_id, max_pairs * 2),
         )
         
         for row in cur.fetchall():
-            if len(qa_pairs) >= max_pairs:
-                break
-                
             thread_ts, user_id, reply_count = row
             
-            # Get the question (parent message)
             question = self._get_message_text(channel_id, thread_ts)
             if not question or not self._is_good_question(question):
                 continue
             
-            # Get the answer (best reply from thread)
             answer = self._get_best_thread_answer(channel_id, thread_ts)
             if not answer or len(answer) < 50:
                 continue
             
-            # Create training example
-            qa_pairs.append({
-                "text": f"<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n{answer}<|im_end|>"
-            })
-        
-        # Also look for high-value explanatory messages
-        if len(qa_pairs) < max_pairs:
-            cur.execute(
-                """
-                SELECT m.ts, m.user_id
-                FROM messages m  
-                WHERE m.channel_id = ?
-                AND m.thread_ts IS NULL
-                AND (
-                    m.subtype is NULL
-                    OR m.subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
-                )
-                ORDER BY m.ts DESC
-                LIMIT 500
-                """,
-                (channel_id,),
-            )
-            
-            for row in cur.fetchall():
-                if len(qa_pairs) >= max_pairs:
-                    break
-                    
-                ts, user_id = row
-                text = self._get_message_text(channel_id, ts)
-                
-                if text and self._is_valuable_explanation(text):
-                    # Create a question for this explanation
-                    topic = self._extract_topic(text)
-                    if topic:
-                        qa_pairs.append({
-                            "text": f"<|im_start|>user\nCan you explain {topic}?<|im_end|>\n<|im_start|>assistant\n{text}<|im_end|>"
-                        })
+            qa_pair = self._create_qa_pair(question, answer, channel_name)
+            if qa_pair:
+                qa_pairs.append(qa_pair)
         
         return qa_pairs
 
+    def _extract_explanation_pairs(self, channel_id: str, channel_name: str, max_pairs: int) -> List[QAPair]:
+        qa_pairs = []
+        cur = self.db.conn.cursor()
+        
+        cur.execute(
+            """
+            SELECT m.ts, m.user_id
+            FROM messages m  
+            WHERE m.channel_id = ?
+            AND m.thread_ts IS NULL
+            AND (
+                m.subtype is NULL
+                OR m.subtype NOT IN ('channel_join', 'channel_leave', 'bot_message')
+            )
+            ORDER BY m.ts DESC
+            LIMIT 500
+            """,
+            (channel_id,),
+        )
+        
+        for row in cur.fetchall():
+            ts, user_id = row
+            text = self._get_message_text(channel_id, ts)
+            
+            if text and self._is_valuable_explanation(text):
+                qa_pair = self._create_explanation_qa(text, channel_name)
+                if qa_pair:
+                    qa_pairs.append(qa_pair)
+                    if len(qa_pairs) >= max_pairs:
+                        break
+        
+        return qa_pairs
+
+    def _create_qa_pair(self, question: str, answer: str, channel: str) -> Optional[QAPair]:
+        """Create a QA pair with optional processing."""
+        return QAPair(
+            question=question,
+            answer=answer,
+            channel=channel,
+            quality_score=self._score_qa_quality(question, answer)
+        )
+
+    def _create_explanation_qa(self, text: str, channel: str) -> Optional[QAPair]:
+        """Create QA from an explanatory message."""
+        topic = self._extract_topic(text)
+        if topic:
+            question = f"Can you explain {topic}?"
+            return QAPair(
+                question=question,
+                answer=text,
+                channel=channel,
+                quality_score=self._score_explanation_quality(text)
+            )
+        return None
+
     def _get_message_text(self, channel_id: str, ts: str) -> Optional[str]:
-        """Get cleaned text content of a message."""
         raw_data = self.db.get_compressed_data("messages", f"{channel_id}_{ts}")
         if not raw_data:
             return None
@@ -173,7 +216,6 @@ class Exporter:
             return None
 
     def _get_thread_messages(self, channel_id: str, thread_ts: str) -> List[Dict]:
-        """Get all messages in a thread."""
         cur = self.db.conn.cursor()
         cur.execute(
             """
@@ -198,7 +240,6 @@ class Exporter:
         return thread_messages
 
     def _get_best_thread_answer(self, channel_id: str, thread_ts: str) -> Optional[str]:
-        """Extract the best answer from a thread."""
         thread_messages = self._get_thread_messages(channel_id, thread_ts)
         if len(thread_messages) < 2:
             return None
@@ -206,14 +247,12 @@ class Exporter:
         best_answer = None
         best_score = 0
         
-        # Skip the first message (the question)
         for msg in thread_messages[1:]:
             text = self._clean_slack_formatting(msg.get("text", ""))
             
             if len(text) < 30:
                 continue
             
-            # Score the answer quality
             score = self._score_answer_quality(text, msg)
             
             if score > best_score:
@@ -223,56 +262,65 @@ class Exporter:
         return best_answer
 
     def _score_answer_quality(self, text: str, msg_data: Dict) -> float:
-        """Score the quality of an answer."""
         score = 0.0
         
-        # Length bonus (substantial answers are better)
         if 50 < len(text) < 1000:
             score += 2.0
         elif 1000 <= len(text) < 2000:
             score += 1.5
         
-        # Code blocks are valuable
         if '```' in text:
             score += 3.0
         elif text.count('`') >= 2:
             score += 1.5
         
-        # Structured content (lists, steps)
         if any(marker in text for marker in ['1.', '2.', '- ', '* ', '•']):
             score += 2.0
         
-        # Links often indicate references/solutions
         if 'http' in text:
             score += 1.0
         
-        # Reactions indicate community validation
         reactions = msg_data.get("reactions", [])
         if reactions:
             score += min(sum(r.get("count", 0) for r in reactions) * 0.5, 3.0)
         
-        # Files might contain important information
         if msg_data.get("files"):
             score += 1.5
         
         return score
 
+    def _score_qa_quality(self, question: str, answer: str) -> float:
+        """Basic quality scoring for Q&A pairs."""
+        score = 5.0
+        
+        if question.endswith('?'):
+            score += 0.5
+        if len(question) > 20:
+            score += 0.5
+        if len(answer) > 100:
+            score += 1.0
+        if '```' in answer:
+            score += 1.0
+        if any(marker in answer for marker in ['1.', '2.', '- ']):
+            score += 0.5
+            
+        return min(score, 10.0)
+
+    def _score_explanation_quality(self, text: str) -> float:
+        """Score quality of explanatory text."""
+        return self._score_qa_quality("", text)
+
     def _is_good_question(self, text: str) -> bool:
-        """Check if text is a good question for training."""
         text = text.strip()
         
-        # Too short or too long
         if len(text) < 15 or len(text) > 500:
             return False
         
-        # Should be a question or problem statement
         text_lower = text.lower()
         
-        # Direct questions
         if text.endswith('?'):
             return True
         
-        # Question patterns
         question_patterns = [
             'how do', 'how can', 'how to', 'what is', 'what are', 'where',
             'when', 'why', 'does anyone', 'can someone', 'is there',
@@ -283,14 +331,11 @@ class Exporter:
         return any(pattern in text_lower for pattern in question_patterns)
 
     def _is_valuable_explanation(self, text: str) -> bool:
-        """Check if a message contains a valuable explanation."""
-        # Must be substantial
         if len(text) < 200:
             return False
         
         text_lower = text.lower()
         
-        # Look for explanatory patterns
         explanation_indicators = [
             'this is how', 'the way to', 'you can', 'you need to',
             'in order to', 'the process', 'here\'s how', 'solution is',
@@ -299,7 +344,6 @@ class Exporter:
         
         has_explanation = any(indicator in text_lower for indicator in explanation_indicators)
         
-        # Must also have substance (code, lists, or technical content)
         has_code = '```' in text or text.count('`') >= 2
         has_structure = any(marker in text for marker in ['1.', '2.', '- ', '* '])
         has_technical = self._has_technical_content(text_lower)
@@ -307,7 +351,6 @@ class Exporter:
         return has_explanation and (has_code or has_structure or has_technical)
 
     def _has_technical_content(self, text_lower: str) -> bool:
-        """Check if text contains technical content."""
         technical_terms = [
             'api', 'database', 'function', 'method', 'class', 'endpoint',
             'deployment', 'configuration', 'authentication', 'integration',
@@ -319,11 +362,8 @@ class Exporter:
         return matches >= 2
 
     def _extract_topic(self, text: str) -> Optional[str]:
-        """Extract a topic from explanatory text."""
-        # Try to get the first sentence or main subject
         first_sentence = text.split('.')[0].strip()
         
-        # Clean common prefixes
         prefixes_to_remove = [
             'this is how', 'the way to', 'to', 'you can', 'you need to',
             'basically', 'essentially', 'so', 'well', 'ok', 'okay'
@@ -334,12 +374,10 @@ class Exporter:
             if topic.startswith(prefix + ' '):
                 topic = topic[len(prefix):].strip()
         
-        # Capitalize and clean
         topic = topic.strip(' ,.!?')
         if len(topic) > 10 and len(topic) < 100:
             return topic
         
-        # Fallback: look for key technical terms
         text_lower = text.lower()
         for term in ['api', 'database', 'authentication', 'deployment', 'integration', 'configuration']:
             if term in text_lower:
@@ -348,48 +386,223 @@ class Exporter:
         return None
 
     def _clean_slack_formatting(self, text: str) -> str:
-        """Clean Slack-specific formatting."""
         if not text:
             return ""
 
-        # Convert user mentions
         text = re.sub(r'<@([A-Z0-9]+)>', lambda m: f"@{self.db.get_user_display_name(m.group(1))}", text)
-
-        # Convert channel mentions
         text = re.sub(r'<#([A-Z0-9]+)\|([^>]+)>', r'#\2', text)
-
-        # Convert links
         text = re.sub(r'<(https?://[^|>]+)\|([^>]+)>', r'\2 (\1)', text)
         text = re.sub(r'<(https?://[^>]+)>', r'\1', text)
-
-        # Clean whitespace
         text = re.sub(r'\s+', ' ', text).strip()
 
         return text
 
     def _write_export_metadata(self, output_dir: str, total_pairs: int, channel_stats: Dict[str, int]) -> None:
-        """Write metadata about the export."""
         metadata = {
-            "export_type": "fine_tuning_qa",
+            "export_type": self._get_export_type(),
             "exported_at": datetime.now().isoformat(),
             "format": {
                 "type": "jsonl",
-                "schema": {"text": "string containing formatted Q&A pair"},
+                "schema": {"text": "formatted Q&A pair"},
                 "template": "<|im_start|>user\\n{question}<|im_end|>\\n<|im_start|>assistant\\n{answer}<|im_end|>"
             },
             "statistics": {
                 "total_qa_pairs": total_pairs,
                 "channels_processed": len(channel_stats),
                 "pairs_per_channel": dict(sorted(channel_stats.items(), key=lambda x: x[1], reverse=True))
-            },
-            "quality_criteria": [
-                "Questions must be clear and substantial (15-500 chars)",
-                "Answers must be at least 50 characters",
-                "Prioritizes threads with 2-10 replies",
-                "Scores answers based on length, code content, structure, and community validation",
-                "Includes high-value explanatory messages as Q&A pairs"
-            ]
+            }
         }
         
+        metadata.update(self._get_additional_metadata())
+        
         with open(os.path.join(output_dir, "export_metadata.json"), "w", encoding="utf-8") as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False) 
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+    
+    def _get_export_type(self) -> str:
+        return "basic_qa"
+    
+    def _get_additional_metadata(self) -> Dict:
+        return {}
+
+
+class Exporter(BaseExporter):
+    """Standard exporter without LLM enhancement."""
+    pass
+
+
+class EnhancedExporter(BaseExporter):
+    """Exporter with LLM enhancement capabilities."""
+    
+    def __init__(self, db, model_name: str = "microsoft/Phi-3-mini-4k-instruct"):
+        super().__init__(db)
+        self.model_name = model_name
+        self.llm = None
+        self.enhanced_count = 0
+        self.synthetic_count = 0
+        
+    def _print_export_info(self, max_pairs_per_channel: int = 100) -> None:
+        super()._print_export_info(max_pairs_per_channel)
+        print(f"Using LLM enhancement: {self.model_name}")
+        
+    def _get_output_filename(self) -> str:
+        return "enhanced_qa_training.jsonl"
+    
+    def _get_export_type(self) -> str:
+        return "llm_enhanced_qa"
+    
+    def _get_additional_metadata(self) -> Dict:
+        return {
+            "enhancements": {
+                "model": self.model_name,
+                "enhanced_answers": self.enhanced_count,
+                "synthetic_pairs": self.synthetic_count
+            }
+        }
+
+    def _load_llm(self):
+        """Lazy load LLM when needed."""
+        if self.llm is not None:
+            return
+            
+        try:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            
+            print(f"Loading LLM: {self.model_name}")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                trust_remote_code=True
+            )
+            self.model.eval()
+            self.llm = True
+        except ImportError:
+            print("Warning: transformers not installed, falling back to basic export")
+            self.llm = False
+    
+    def _create_qa_pair(self, question: str, answer: str, channel: str) -> Optional[QAPair]:
+        """Create enhanced QA pair."""
+        self._load_llm()
+        
+        if self.llm:
+            enhanced_answer = self._enhance_answer(question, answer, channel)
+            if enhanced_answer != answer:
+                self.enhanced_count += 1
+                answer = enhanced_answer
+        
+        return QAPair(
+            question=question,
+            answer=answer,
+            channel=channel,
+            quality_score=self._score_qa_quality(question, answer),
+            metadata={"enhanced": self.llm and enhanced_answer != answer}
+        )
+    
+    def _create_explanation_qa(self, text: str, channel: str) -> Optional[QAPair]:
+        """Create synthetic Q&A from explanation."""
+        self._load_llm()
+        
+        if self.llm:
+            synthetic_pairs = self._generate_questions_for_explanation(text, channel)
+            if synthetic_pairs:
+                self.synthetic_count += len(synthetic_pairs)
+                return synthetic_pairs[0]  # Return best one
+        
+        # Fallback to basic extraction
+        return super()._create_explanation_qa(text, channel)
+    
+    def _enhance_answer(self, question: str, answer: str, channel: str) -> str:
+        """Enhance answer using LLM."""
+        if len(answer) > 500 and '```' in answer:
+            return answer  # Already high quality
+            
+        prompt = f"""Improve this answer to be more complete and helpful.
+
+Question: {question}
+Answer: {answer}
+
+Enhanced answer:"""
+        
+        try:
+            enhanced = self._generate(prompt, max_tokens=600)
+            
+            # Quality check
+            if 0.5 < len(enhanced) / len(answer) < 3.0:
+                return enhanced
+        except:
+            pass
+            
+        return answer
+    
+    def _generate_questions_for_explanation(self, text: str, channel: str) -> List[QAPair]:
+        """Generate questions that this text answers."""
+        prompt = f"""This message contains useful information:
+
+{text[:500]}
+
+Generate 2 specific questions this answers. Format: Q1: ... Q2: ..."""
+        
+        try:
+            response = self._generate(prompt, max_tokens=150)
+            qa_pairs = []
+            
+            for line in response.split('\n'):
+                if line.strip().startswith(('Q1:', 'Q2:')):
+                    question = line.split(':', 1)[1].strip()
+                    if len(question) > 15:
+                        qa_pairs.append(QAPair(
+                            question=question,
+                            answer=text,
+                            channel=channel,
+                            quality_score=self._score_explanation_quality(text),
+                            metadata={"synthetic": True}
+                        ))
+            
+            return qa_pairs
+        except:
+            return []
+    
+    def _score_qa_quality(self, question: str, answer: str) -> float:
+        """Enhanced scoring using LLM if available."""
+        if not self.llm:
+            return super()._score_qa_quality(question, answer)
+            
+        try:
+            prompt = f"""Rate this Q&A quality 0-10:
+Q: {question[:100]}
+A: {answer[:200]}...
+
+Just reply with a number:"""
+            
+            response = self._generate(prompt, max_tokens=10)
+            
+            import re
+            numbers = re.findall(r'\d+\.?\d*', response)
+            if numbers:
+                return min(float(numbers[0]), 10.0)
+        except:
+            pass
+            
+        return super()._score_qa_quality(question, answer)
+    
+    def _generate(self, prompt: str, max_tokens: int) -> str:
+        """Generate text using the LLM."""
+        import torch
+        
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                temperature=0.7,
+                do_sample=True,
+                top_p=0.9,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return response[len(prompt):].strip() 
