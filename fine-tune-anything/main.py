@@ -819,7 +819,7 @@ class FineTuner:
             print(f"Found completed model: {completed_model_path}")
             print(f"Loading existing adapter and continuing training...")
             print(f"{'='*80}\n")
-            
+
             # Load the existing adapter into the current model
             self._load_existing_adapter(completed_model_path)
             trainer.train()
@@ -832,43 +832,47 @@ class FineTuner:
         # Cleanup
         del trainer
         MemoryManager.cleanup()
-    
+
     def _find_completed_model(self) -> Optional[str]:
         """Find a completed model in the scoped output directory."""
         scoped_path = Path(self.scoped_output_dir)
         base_path = Path(self.training_config.output_dir)
-        
+
         # Check scoped directory first
         for path in [scoped_path, base_path]:
             if path.exists():
                 adapter_file = path / "adapter_model.safetensors"
                 if adapter_file.exists():
                     return str(path)
-        
+
         return None
-    
+
     def _load_existing_adapter(self, model_path: str):
         """Load an existing adapter into the current model."""
         try:
             print(f"Loading existing adapter from: {model_path}")
-            
+
             # The model should already have LoRA applied from the setup
             # We need to load the trained weights into it
             from peft import PeftModel
-            
+
             # Get the base model (without the current LoRA)
-            base_model = self.model_manager.model.base_model if hasattr(self.model_manager.model, 'base_model') else self.model_manager.model
-            
+            base_model = (
+                self.model_manager.model.base_model
+                if hasattr(self.model_manager.model, "base_model")
+                else self.model_manager.model
+            )
+
             # Load the existing adapter
             self.model_manager.model = PeftModel.from_pretrained(base_model, model_path)
-            
+
             # Re-prepare for training
             self.model_manager.model.config.use_cache = False
             if hasattr(self.model_manager.model, "enable_input_require_grads"):
                 self.model_manager.model.enable_input_require_grads()
-            
+
             print("Successfully loaded existing adapter for continued training")
-            
+
         except Exception as e:
             print(f"Warning: Could not load existing adapter: {e}")
             print("Continuing with fresh adapter...")
@@ -983,36 +987,63 @@ class InferenceEngine:
     def generate_response(self, prompt: str) -> str:
         """Generate a response to the given prompt."""
         formatted_prompt = self._format_prompt(prompt)
+        return self._generate_with_model(formatted_prompt)
 
-        generator = pipeline(
-            "text-generation",
-            model=self.model_manager.model,
-            tokenizer=self.model_manager.tokenizer,
-            device_map="auto",
-        )
+    def generate_conversation_response(
+        self, conversation_history: List[Dict[str, str]]
+    ) -> str:
+        """Generate a response to a conversation history."""
+        formatted_prompt = self._format_conversation(conversation_history)
+        return self._generate_with_model(formatted_prompt)
 
-        result = generator(
-            formatted_prompt,
-            max_new_tokens=self.config.max_new_tokens,
-            do_sample=True,
-            temperature=self.config.temperature,
-            top_p=self.config.top_p,
-            repetition_penalty=self.config.repetition_penalty,
-        )
+    def _generate_with_model(self, formatted_prompt: str) -> str:
+        """Generate response using the model with improved parameters."""
+        # Set model to eval mode
+        self.model_manager.model.eval()
 
-        response = self._extract_response(result[0]["generated_text"], formatted_prompt)
+        try:
+            with torch.no_grad():
+                inputs = self.model_manager.tokenizer(
+                    formatted_prompt,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=2048,
+                ).to(self.model_manager.model.device)
 
-        # Cleanup
-        del generator
-        MemoryManager.cleanup()
+                outputs = self.model_manager.model.generate(
+                    **inputs,
+                    max_new_tokens=self.config.max_new_tokens,
+                    min_new_tokens=10,  # Ensure minimum response length
+                    do_sample=True,
+                    temperature=self.config.temperature,
+                    top_p=self.config.top_p,
+                    repetition_penalty=self.config.repetition_penalty,
+                    pad_token_id=self.model_manager.tokenizer.pad_token_id,
+                    eos_token_id=self.model_manager.tokenizer.eos_token_id,
+                    early_stopping=False,  # Prevent early stopping
+                    no_repeat_ngram_size=3,  # Prevent repetitive responses
+                )
 
-        return response
+                response = self.model_manager.tokenizer.decode(
+                    outputs[0], skip_special_tokens=True
+                )
+
+                return self._extract_response(response, formatted_prompt)
+
+        finally:
+            MemoryManager.cleanup()
 
     def _format_prompt(self, prompt: str) -> str:
         """Format prompt using chat template."""
         messages = [{"role": "user", "content": prompt}]
         return self.model_manager.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
+        )
+
+    def _format_conversation(self, conversation_history: List[Dict[str, str]]) -> str:
+        """Format conversation history using chat template."""
+        return self.model_manager.tokenizer.apply_chat_template(
+            conversation_history, tokenize=False, add_generation_prompt=True
         )
 
     def _extract_response(self, generated_text: str, prompt: str) -> str:
@@ -1142,7 +1173,7 @@ class FineTuningApplication:
         fine_tuner.train(processed_dataset, callbacks=callbacks if callbacks else None)
 
     def run_inference(self):
-        """Execute the inference workflow."""
+        """Execute the inference workflow with REPL."""
         print(
             f"Loading model {self.model_config.name} with adapter from {self.args.output_dir}"
         )
@@ -1155,9 +1186,53 @@ class FineTuningApplication:
         )
 
         engine = InferenceEngine(self.model_manager, inference_config)
-        response = engine.generate_response(self.args.prompt)
 
-        print("\n[Model Response]:\n", response)
+        # Start REPL
+        self._run_conversation_repl(engine)
+
+    def _run_conversation_repl(self, engine: InferenceEngine):
+        """Run an interactive REPL for conversations."""
+        print("\n" + "=" * 80)
+        print("Interactive Conversation Mode")
+        print("Type your messages below. Type 'quit', 'exit', or 'q' to stop.")
+        print("Type 'clear' to start a new conversation.")
+        print("=" * 80 + "\n")
+
+        conversation_history = []
+
+        while True:
+            try:
+                user_input = input("You: ").strip()
+
+                if user_input.lower() in ["quit", "exit", "q"]:
+                    print("Goodbye!")
+                    break
+
+                if user_input.lower() == "clear":
+                    conversation_history = []
+                    print("Conversation cleared.")
+                    continue
+
+                if not user_input:
+                    continue
+
+                # Add user message to conversation history
+                conversation_history.append({"role": "user", "content": user_input})
+
+                # Generate response with full conversation context
+                response = engine.generate_conversation_response(conversation_history)
+
+                # Add assistant response to conversation history
+                conversation_history.append({"role": "assistant", "content": response})
+
+                print(f"Assistant: {response}\n")
+
+            except KeyboardInterrupt:
+                print("\n\nGoodbye!")
+                break
+            except EOFError:
+                print("\n\nGoodbye!")
+                break
 
     def _load_dataset(self) -> Dataset:
         """Load dataset from JSONL file."""
@@ -1258,7 +1333,6 @@ def parse_arguments():
     parser.add_argument("--lora-dropout", type=float, default=0.1, help="LoRA dropout.")
 
     # Inference parameters
-    parser.add_argument("--prompt", type=str, help="Prompt to run for inference mode.")
     parser.add_argument(
         "--temperature", type=float, default=0.7, help="Temperature for inference."
     )
@@ -1329,8 +1403,6 @@ def main():
     # Validate arguments
     if args.train and not args.jsonl_file:
         raise ValueError("You must provide --jsonl-file for training mode.")
-    if args.inference and not args.prompt:
-        raise ValueError("You must provide --prompt for inference mode.")
 
     # Run application
     app = FineTuningApplication(args)
