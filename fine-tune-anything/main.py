@@ -700,11 +700,8 @@ class PeriodicInferenceCallback(TrainerCallback):
         self.model_manager.model.eval()
 
         try:
-            # Format prompt
-            messages = [{"role": "user", "content": self.test_prompt}]
-            formatted_prompt = self.model_manager.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
-            )
+            # Format prompt using same format as training
+            formatted_prompt = f"<|im_start|>user\n{self.test_prompt}<|im_end|>\n<|im_start|>assistant\n"
 
             # Generate response
             with torch.no_grad():
@@ -1013,15 +1010,16 @@ class InferenceEngine:
                 outputs = self.model_manager.model.generate(
                     **inputs,
                     max_new_tokens=self.config.max_new_tokens,
-                    min_new_tokens=10,  # Ensure minimum response length
+                    min_new_tokens=15,  # Ensure minimum response length
                     do_sample=True,
                     temperature=self.config.temperature,
                     top_p=self.config.top_p,
-                    repetition_penalty=self.config.repetition_penalty,
+                    repetition_penalty=1.2,  # Stronger repetition penalty
                     pad_token_id=self.model_manager.tokenizer.pad_token_id,
                     eos_token_id=self.model_manager.tokenizer.eos_token_id,
                     early_stopping=False,  # Prevent early stopping
-                    no_repeat_ngram_size=3,  # Prevent repetitive responses
+                    no_repeat_ngram_size=4,  # Prevent repetitive responses
+                    length_penalty=1.0,  # Encourage longer responses
                 )
 
                 response = self.model_manager.tokenizer.decode(
@@ -1034,21 +1032,39 @@ class InferenceEngine:
             MemoryManager.cleanup()
 
     def _format_prompt(self, prompt: str) -> str:
-        """Format prompt using chat template."""
-        messages = [{"role": "user", "content": prompt}]
-        return self.model_manager.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
+        """Format prompt using same format as training."""
+        # Use the same format as training data
+        formatted = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        return formatted
+    
     def _format_conversation(self, conversation_history: List[Dict[str, str]]) -> str:
-        """Format conversation history using chat template."""
-        return self.model_manager.tokenizer.apply_chat_template(
-            conversation_history, tokenize=False, add_generation_prompt=True
-        )
+        """Format conversation history using same format as training."""
+        # Use the same format as training data
+        formatted_parts = []
+        for msg in conversation_history:
+            formatted_parts.append(f"<|im_start|>{msg['role']}\n{msg['content']}<|im_end|>")
+        
+        # Add the assistant prompt at the end
+        formatted_parts.append("<|im_start|>assistant\n")
+        return "\n".join(formatted_parts)
 
     def _extract_response(self, generated_text: str, prompt: str) -> str:
         """Extract the model's response from generated text."""
-        return generated_text[len(prompt) :].strip()
+        # Remove the prompt part
+        if prompt in generated_text:
+            response = generated_text[len(prompt):].strip()
+        else:
+            response = generated_text.strip()
+        
+        # Remove any trailing <|im_end|> tokens that might have been generated
+        if response.endswith("<|im_end|>"):
+            response = response[:-len("<|im_end|>")].strip()
+        
+        # Remove any trailing <|im_start|> tokens (in case it started a new turn)
+        if "<|im_start|>" in response:
+            response = response.split("<|im_start|>")[0].strip()
+        
+        return response
 
 
 class FineTuningApplication:
