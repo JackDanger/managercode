@@ -337,14 +337,15 @@ def main():
 
         if args.fine_tune:
             exporter = Exporter(db)
-            exporter.export_for_fine_tuning(args.fine_tune)
+            exporter.export_fine_tuning_data(args.fine_tune)
             return
 
         if args.rag:
-            exporter = Exporter(db)
-            exporter.export_for_rag(args.rag, include_thread_summaries=True, batch_size=args.batch_size)
+            print("RAG export is no longer supported in the simplified exporter.")
+            print("Use --fine-tune instead to export Q&A training data.")
             return
 
+        from importer import Importer
         importer = Importer(db, args)
         importer.import_slack_archive()
 
